@@ -20,7 +20,13 @@ os.makedirs(INPUT_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 os.makedirs(PROGRESS_DIR, exist_ok=True)
 
-app = FastAPI()
+app = FastAPI(
+    title="Render Backend",
+    docs_url="/docs",
+    redoc_url="/redoc",
+    openapi_url="/openapi.json"
+)
+
 
 
 def run_transcription(job_id: str, input_path: str):
