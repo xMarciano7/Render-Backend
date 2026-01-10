@@ -101,7 +101,7 @@ def progress(job_id: str):
     data = r.json()
     status = data.get("status")
 
-    if status == "SUCCEEDED":
+    if status in ("SUCCEEDED", "COMPLETED", "COMPLETED_WITH_WARNINGS"):
         output = data.get("output") or {}
         url = output.get("video_url")
 
@@ -113,6 +113,7 @@ def progress(job_id: str):
             f.write(url)
 
         wp(job_id, 100)
+
 
     elif status == "FAILED":
         wp(job_id, -1)
