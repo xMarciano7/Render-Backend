@@ -62,7 +62,7 @@ app.add_middleware(
 # =========================
 
 class UploadURL(BaseModel):
-    video_url: str
+    youtube_url: str
     subtitle_preset: dict  # EXACTO lo que sale del frontend
 
 # =========================
