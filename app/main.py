@@ -1,6 +1,7 @@
 import os
 import uuid
 import requests
+import json
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
@@ -13,23 +14,33 @@ BASE = os.path.dirname(os.path.abspath(__file__))
 STO = os.path.join(BASE, "storage")
 PRO = os.path.join(STO, "progress")
 URLS = os.path.join(STO, "urls")
+PRESETS = os.path.join(STO, "presets")
 
 os.makedirs(PRO, exist_ok=True)
 os.makedirs(URLS, exist_ok=True)
+os.makedirs(PRESETS, exist_ok=True)
 
 app = FastAPI(docs_url="/docs", openapi_url="/openapi.json")
 
 
+# ---------
+# MODELS
+# ---------
+
 class UploadURL(BaseModel):
     video_url: str
+    subtitle_preset: dict
 
+
+# ---------
+# HELPERS
+# ---------
 
 def wp(job_id: str, value: int):
     """write progress"""
     path = os.path.join(PRO, f"{job_id}.txt")
     current = rp(job_id)
 
-    # nunca retroceder progreso
     if current >= value:
         return
 
@@ -45,18 +56,33 @@ def rp(job_id: str) -> int:
         return -1
 
 
+# ---------
+# ROUTES
+# ---------
+
 @app.post("/upload")
 def upload_url(body: UploadURL):
     job_id = str(uuid.uuid4())
     wp(job_id, 5)
 
+    # Guardar preset EXACTO del usuario
+    preset_path = os.path.join(PRESETS, f"{job_id}.json")
+    with open(preset_path, "w", encoding="utf-8") as f:
+        json.dump(body.subtitle_preset, f, ensure_ascii=False, indent=2)
+
+    # Llamada a RunPod (reenviamos TODO)
     r = requests.post(
         f"https://api.runpod.ai/v2/{RUNPOD_ENDPOINT_ID}/run",
         headers={
             "Authorization": f"Bearer {RUNPOD_API_KEY}",
             "Content-Type": "application/json",
         },
-        json={"input": {"video_url": body.video_url}},
+        json={
+            "input": {
+                "video_url": body.video_url,
+                "subtitle_preset": body.subtitle_preset,
+            }
+        },
         timeout=20,
     )
 
@@ -78,7 +104,6 @@ def upload_url(body: UploadURL):
 
 @app.get("/progress/{job_id}")
 def progress(job_id: str):
-    # si ya está terminado, no volvemos a tocar RunPod
     current = rp(job_id)
     if current == 100:
         return {"percent": 100}
@@ -114,12 +139,10 @@ def progress(job_id: str):
 
         wp(job_id, 100)
 
-
     elif status == "FAILED":
         wp(job_id, -1)
 
     else:
-        # en progreso real
         wp(job_id, 50)
 
     return {"percent": rp(job_id)}
