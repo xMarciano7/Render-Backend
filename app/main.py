@@ -47,7 +47,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "https://uclat-mysite-teydijsn-othmanebenbrahim12.wix-vibe.com",
+        "https://ucatml-my-site-teyd1jsn-othmanebenbrahim12.wix-vibe.com",
         "http://localhost:3000",
         "http://localhost:5173",
     ],
@@ -117,7 +117,7 @@ def upload_url(body: UploadURL):
         json={
             "input": {
                 "job_id": job_id,
-                "video_url": body.video_url,
+                "youtube_url": body.youtube_url,
                 "subtitle_preset": body.subtitle_preset,  # PASA TODO
             }
         },
@@ -171,14 +171,14 @@ def progress(job_id: str):
 
     if status in ("SUCCEEDED", "COMPLETED", "COMPLETED_WITH_WARNINGS"):
         output = data.get("output") or {}
-        video_url = output.get("video_url")
+        youtube_url = output.get("youtube_url")
 
-        if not video_url:
+        if not youtube_url:
             write_progress(job_id, -1)
             return {"percent": -1}
 
         with open(os.path.join(URLS, f"{job_id}.txt"), "w") as f:
-            f.write(video_url)
+            f.write(youtube_url)
 
         write_progress(job_id, 100)
 
