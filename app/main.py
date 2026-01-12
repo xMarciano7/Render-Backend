@@ -47,7 +47,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "https://7xmjuu-my-site-teyd1jsn-othmanebenbrahim12.wix-vibe.com",
+        "https://sgpwlh-my-site-teyd1jsn-othmanebenbrahim12.wix-vibe.com",
         "http://localhost:3000",
         "http://localhost:5173",
     ],
