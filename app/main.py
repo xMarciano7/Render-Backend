@@ -1,211 +1,206 @@
-import os
-import uuid
-import json
-import requests
-
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, BackgroundTasks, HTTPException
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
-from fastapi.responses import RedirectResponse
-from fastapi.middleware.cors import CORSMiddleware
-
+import uuid
+import os
+import json
+import time
+import requests
+import subprocess
 
 # =========================
-# ENV
+# CONFIG
 # =========================
 
 RUNPOD_API_KEY = os.getenv("RUNPOD_API_KEY")
-RUNPOD_ENDPOINT_ID = os.getenv("RUNPOD_ENDPOINT_ID")
 
-if not RUNPOD_API_KEY or not RUNPOD_ENDPOINT_ID:
-    raise RuntimeError("RUNPOD_API_KEY or RUNPOD_ENDPOINT_ID missing")
+RUNPOD_WHISPER_ENDPOINT = "30dqc4pwnknw0c"      # whisper worker
+RUNPOD_TRANSLATOR_ENDPOINT = "30fje7gn3s3dt8"   # translator
 
-# =========================
-# PATHS
-# =========================
+RUNPOD_BASE = "https://api.runpod.ai/v2"
+HEADERS = {
+    "Authorization": f"Bearer {RUNPOD_API_KEY}",
+    "Content-Type": "application/json"
+}
 
-BASE = os.path.dirname(os.path.abspath(__file__))
-STO = os.path.join(BASE, "storage")
-PRO = os.path.join(STO, "progress")
-URLS = os.path.join(STO, "urls")
-PRESETS = os.path.join(STO, "presets")
+BASE_DIR = "storage"
+INPUT_DIR = f"{BASE_DIR}/input"
+OUTPUT_DIR = f"{BASE_DIR}/output"
+PROGRESS_DIR = f"{BASE_DIR}/progress"
 
-os.makedirs(PRO, exist_ok=True)
-os.makedirs(URLS, exist_ok=True)
-os.makedirs(PRESETS, exist_ok=True)
+os.makedirs(INPUT_DIR, exist_ok=True)
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+os.makedirs(PROGRESS_DIR, exist_ok=True)
 
-# =========================
-# APP
-# =========================
-
-app = FastAPI(
-    title="ClipFile Backend",
-    version="1.0",
-    docs_url="/docs",
-    openapi_url="/openapi.json",
-)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "https://sgpwlh-my-site-teyd1jsn-othmanebenbrahim12.wix-vibe.com",
-        "http://localhost:3000",
-        "http://localhost:5173",
-    ],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
+app = FastAPI()
 
 # =========================
 # MODELS
 # =========================
 
 class UploadURL(BaseModel):
-    youtube_url: str
-    subtitle_preset: dict  # EXACTO lo que sale del frontend
+    video_url: str
+    subtitle_preset: dict | None = None
+    languages: list[str] | None = None  # ej ["eng_Latn","fra_Latn"]
 
 # =========================
-# PROGRESS HELPERS
+# RUNPOD HELPERS
 # =========================
 
-def write_progress(job_id: str, value: int):
-    path = os.path.join(PRO, f"{job_id}.txt")
+def run_runpod(endpoint_id: str, payload: dict) -> str:
+    r = requests.post(
+        f"{RUNPOD_BASE}/{endpoint_id}/run",
+        headers=HEADERS,
+        json={"input": payload},
+        timeout=30
+    )
+    r.raise_for_status()
+    return r.json()["id"]
+
+def wait_runpod(endpoint_id: str, job_id: str) -> dict:
+    while True:
+        r = requests.get(
+            f"{RUNPOD_BASE}/{endpoint_id}/status/{job_id}",
+            headers=HEADERS,
+            timeout=30
+        )
+        r.raise_for_status()
+        data = r.json()
+
+        if data["status"] == "COMPLETED":
+            return data["output"]
+
+        if data["status"] in ("FAILED", "CANCELLED"):
+            raise RuntimeError(data)
+
+        time.sleep(2)
+
+# =========================
+# PROGRESS
+# =========================
+
+def set_progress(job_id: str, percent: int):
+    with open(f"{PROGRESS_DIR}/{job_id}.json", "w") as f:
+        json.dump({"percent": percent}, f)
+
+# =========================
+# ASS GENERATOR (EXISTENTE)
+# =========================
+
+def generate_ass(segments, preset, out_path):
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write("[Script Info]\n")
+        f.write("ScriptType: v4.00+\n\n")
+        f.write("[V4+ Styles]\n")
+        f.write("Format: Name,Fontname,Fontsize,PrimaryColour,OutlineColour,BorderStyle,Outline,Alignment,MarginL,MarginR,MarginV\n")
+        f.write(
+            f"Style: Default,{preset['fontFamily']},{preset['fontSize']},&H00FFFFFF,&H00000000,1,{preset['outlineThickness']},2,30,30,30\n\n"
+        )
+        f.write("[Events]\n")
+        f.write("Format: Layer,Start,End,Style,Text\n")
+
+        for s in segments:
+            start = s["start"]
+            end = s["end"]
+            text = s["text"].replace("\n", " ")
+            f.write(f"Dialogue: 0,0:{start:.2f},0:{end:.2f},Default,{text}\n")
+
+# =========================
+# PIPELINE
+# =========================
+
+def process_video(job_id: str, data: UploadURL):
     try:
-        current = int(open(path).read())
-        if current >= value:
-            return
-    except:
-        pass
+        set_progress(job_id, 5)
 
-    with open(path, "w") as f:
-        f.write(str(value))
+        # ---------- WHISPER ----------
+        whisper_job = run_runpod(
+            RUNPOD_WHISPER_ENDPOINT,
+            {"video_url": data.video_url}
+        )
 
+        whisper_output = wait_runpod(
+            RUNPOD_WHISPER_ENDPOINT,
+            whisper_job
+        )
 
-def read_progress(job_id: str) -> int:
-    try:
-        return int(open(os.path.join(PRO, f"{job_id}.txt")).read())
-    except:
-        return -1
+        segments = whisper_output["segments"]
+        source_lang = whisper_output["language"]
+
+        set_progress(job_id, 40)
+
+        # ---------- TRANSLATIONS (OPTIONAL) ----------
+        translations = {}
+
+        if data.languages:
+            for lang in data.languages:
+                tr_job = run_runpod(
+                    RUNPOD_TRANSLATOR_ENDPOINT,
+                    {
+                        "source_language": source_lang,
+                        "target_language": lang,
+                        "segments": segments
+                    }
+                )
+                tr_out = wait_runpod(RUNPOD_TRANSLATOR_ENDPOINT, tr_job)
+                translations[lang] = tr_out["segments"]
+
+        set_progress(job_id, 60)
+
+        # ---------- ASS + FFMPEG ----------
+        final_outputs = {}
+
+        all_versions = {"original": segments} | translations
+
+        for key, segs in all_versions.items():
+            ass_path = f"{OUTPUT_DIR}/{job_id}_{key}.ass"
+            mp4_path = f"{OUTPUT_DIR}/{job_id}_{key}.mp4"
+
+            generate_ass(segs, data.subtitle_preset, ass_path)
+
+            subprocess.run([
+                "ffmpeg", "-y",
+                "-i", f"{INPUT_DIR}/{job_id}.mp4",
+                "-vf", f"ass={ass_path}",
+                mp4_path
+            ], check=True)
+
+            final_outputs[key] = mp4_path
+
+        set_progress(job_id, 100)
+
+    except Exception as e:
+        set_progress(job_id, -1)
+        raise e
 
 # =========================
-# ROUTES
+# API
 # =========================
 
 @app.post("/upload")
-def upload_url(body: UploadURL):
-    """
-    1. Recibe URL + subtitle_preset del frontend
-    2. Guarda preset EXACTO
-    3. Lanza job en RunPod
-    """
+def upload_url(data: UploadURL, background: BackgroundTasks):
     job_id = str(uuid.uuid4())
-    write_progress(job_id, 5)
-
-    # Guardar preset EXACTO del usuario
-    preset_path = os.path.join(PRESETS, f"{job_id}.json")
-    with open(preset_path, "w", encoding="utf-8") as f:
-        json.dump(body.subtitle_preset, f, ensure_ascii=False, indent=2)
-
-    # Lanzar RunPod
-    r = requests.post(
-        f"https://api.runpod.ai/v2/{RUNPOD_ENDPOINT_ID}/run",
-        headers={
-            "Authorization": f"Bearer {RUNPOD_API_KEY}",
-            "Content-Type": "application/json",
-        },
-        json={
-            "input": {
-                "job_id": job_id,
-                "youtube_url": body.youtube_url,
-                "subtitle_preset": body.subtitle_preset,  # PASA TODO
-            }
-        },
-        timeout=20,
-    )
-
-    if r.status_code != 200:
-        write_progress(job_id, -1)
-        raise HTTPException(500, r.text)
-
-    runpod_id = r.json().get("id")
-    if not runpod_id:
-        write_progress(job_id, -1)
-        raise HTTPException(500, "RunPod did not return job id")
-
-    # Guardar id de RunPod
-    with open(os.path.join(PRO, f"{job_id}.runpod"), "w") as f:
-        f.write(runpod_id)
-
-    write_progress(job_id, 20)
+    open(f"{INPUT_DIR}/{job_id}.mp4", "wb").close()
+    background.add_task(process_video, job_id, data)
     return {"job_id": job_id}
-
 
 @app.get("/progress/{job_id}")
 def progress(job_id: str):
-    """
-    Consulta estado del job en RunPod
-    """
-    current = read_progress(job_id)
-
-    if current == 100 or current == -1:
-        return {"percent": current}
-
-    meta = os.path.join(PRO, f"{job_id}.runpod")
-    if not os.path.exists(meta):
-        return {"percent": current}
-
-    runpod_id = open(meta).read().strip()
-
-    r = requests.get(
-        f"https://api.runpod.ai/v2/{RUNPOD_ENDPOINT_ID}/status/{runpod_id}",
-        headers={"Authorization": f"Bearer {RUNPOD_API_KEY}"},
-        timeout=10,
-    )
-
-    if r.status_code != 200:
-        return {"percent": current}
-
-    data = r.json()
-    status = data.get("status")
-
-    if status in ("SUCCEEDED", "COMPLETED", "COMPLETED_WITH_WARNINGS"):
-        output = data.get("output") or {}
-        youtube_url = output.get("youtube_url")
-
-        if not youtube_url:
-            write_progress(job_id, -1)
-            return {"percent": -1}
-
-        with open(os.path.join(URLS, f"{job_id}.txt"), "w") as f:
-            f.write(youtube_url)
-
-        write_progress(job_id, 100)
-
-    elif status == "FAILED":
-        write_progress(job_id, -1)
-
-    else:
-        # RUNNING
-        write_progress(job_id, max(current, 50))
-
-    return {"percent": read_progress(job_id)}
-
+    path = f"{PROGRESS_DIR}/{job_id}.json"
+    if not os.path.exists(path):
+        return {"percent": 0}
+    with open(path) as f:
+        return json.load(f)
 
 @app.get("/download/{job_id}")
 def download(job_id: str):
-    """
-    Devuelve el clip final
-    """
-    path = os.path.join(URLS, f"{job_id}.txt")
-    if not os.path.exists(path):
+    files = [f for f in os.listdir(OUTPUT_DIR) if f.startswith(job_id)]
+    if not files:
         raise HTTPException(404, "Not ready")
+    return {
+        "files": files
+    }
 
-    return RedirectResponse(open(path).read().strip())
-
-@app.post("/translator-callback")
-async def translator_callback(data: dict):
-    # aquí recibes el resultado del RunPod translator
-    # data["segments"] ya traducidos
+@app.get("/")
+def health():
     return {"ok": True}
-
