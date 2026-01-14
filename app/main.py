@@ -124,11 +124,8 @@ def upload_url(body: UploadURL):
     job_id = str(uuid.uuid4())
     write_progress(job_id, 5)
 
-    with open(os.path.join(PRESETS, f"{job_id}.json"), "w") as f:
-        json.dump(body.subtitle_preset, f, indent=2)
-
-    with open(os.path.join(META, f"{job_id}.json"), "w") as f:
-        json.dump({"languages": body.languages or []}, f)
+    json.dump(body.subtitle_preset, open(os.path.join(PRESETS, f"{job_id}.json"), "w"))
+    json.dump({"languages": body.languages or []}, open(os.path.join(META, f"{job_id}.json"), "w"))
 
     r = requests.post(
         f"https://api.runpod.ai/v2/{RUNPOD_WORKER_ENDPOINT_ID}/run",
@@ -150,7 +147,7 @@ def upload_url(body: UploadURL):
         write_progress(job_id, -1)
         raise HTTPException(500, r.text)
 
-    runpod_id = r.json().get("id")
+    runpod_id = r.json()["id"]
     open(os.path.join(PRO, f"{job_id}.runpod"), "w").write(runpod_id)
 
     write_progress(job_id, 20)
@@ -191,11 +188,8 @@ def progress(job_id: str):
             write_progress(job_id, -1)
             return {"percent": -1}
 
-        with open(os.path.join(URLS, f"{job_id}_orig.txt"), "w") as f:
-            f.write(base_url)
-
-        with open(os.path.join(SEGS, f"{job_id}_orig.json"), "w") as f:
-            json.dump(segments, f)
+        open(os.path.join(URLS, f"{job_id}_orig.txt"), "w").write(base_url)
+        json.dump(segments, open(os.path.join(SEGS, f"{job_id}_orig.json"), "w"))
 
         languages = json.load(open(os.path.join(META, f"{job_id}.json"))).get("languages", [])
 
@@ -236,8 +230,7 @@ def translator_callback(data: dict):
     segments = data["segments"]
 
     seg_path = os.path.join(SEGS, f"{job_id}_{language}.json")
-    with open(seg_path, "w") as f:
-        json.dump(segments, f)
+    json.dump(segments, open(seg_path, "w"))
 
     r = requests.post(
         f"https://api.runpod.ai/v2/{RUNPOD_WORKER_ENDPOINT_ID}/run",
@@ -248,7 +241,7 @@ def translator_callback(data: dict):
         json={
             "input": {
                 "job_id": job_id,
-                "segments_path": seg_path,
+                "segments": segments,
                 "language": language,
             }
         },
@@ -257,10 +250,8 @@ def translator_callback(data: dict):
     if r.status_code != 200:
         raise HTTPException(500, r.text)
 
-    url = r.json().get("output", {}).get("base_url")
-    if url:
-        with open(os.path.join(URLS, f"{job_id}_{language}.txt"), "w") as f:
-            f.write(url)
+    url = r.json()["output"]["base_url"]
+    open(os.path.join(URLS, f"{job_id}_{language}.txt"), "w").write(url)
 
     mark_language_done(job_id, language)
 
