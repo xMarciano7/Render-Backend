@@ -202,3 +202,10 @@ def download(job_id: str):
         raise HTTPException(404, "Not ready")
 
     return RedirectResponse(open(path).read().strip())
+
+@app.post("/translator-callback")
+async def translator_callback(data: dict):
+    # aquí recibes el resultado del RunPod translator
+    # data["segments"] ya traducidos
+    return {"ok": True}
+
