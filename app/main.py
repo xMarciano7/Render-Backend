@@ -6,7 +6,6 @@ import os
 import uuid
 import json
 import requests
-import time
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
@@ -48,7 +47,7 @@ for p in (PRO, URLS, PRESETS, META, SEGS, LANGDONE, TRIGGERED):
 # APP
 # =========================
 
-app = FastAPI(title="ClipFile Backend", version="1.3")
+app = FastAPI(title="ClipFile Backend", version="1.4")
 
 app.add_middleware(
     CORSMiddleware,
@@ -91,8 +90,7 @@ def write_progress(job_id: str, value: int):
             return
     except:
         pass
-    with open(path, "w") as f:
-        f.write(str(value))
+    open(path, "w").write(str(value))
 
 
 def read_progress(job_id: str) -> int:
@@ -172,11 +170,11 @@ def progress(job_id: str):
     if current in (100, -1):
         return {"percent": current}
 
-    meta_path = os.path.join(PRO, f"{job_id}.runpod")
-    if not os.path.exists(meta_path):
+    runpod_meta = os.path.join(PRO, f"{job_id}.runpod")
+    if not os.path.exists(runpod_meta):
         return {"percent": current}
 
-    runpod_id = open(meta_path).read().strip()
+    runpod_id = open(runpod_meta).read().strip()
 
     r = requests.get(
         f"https://api.runpod.ai/v2/{RUNPOD_WORKER_ENDPOINT_ID}/status/{runpod_id}",
@@ -195,7 +193,7 @@ def progress(job_id: str):
         base_url = output.get("base_url")
         segments = output.get("segments")
 
-        if not base_url or not isinstance(segments, list) or not segments:
+        if not base_url or not segments:
             write_progress(job_id, max(current, 60))
             return {"percent": read_progress(job_id)}
 
@@ -248,6 +246,9 @@ def translator_callback(body: TranslatorCallback):
 
     json.dump(segments, open(os.path.join(SEGS, f"{job_id}_{language}.json"), "w"))
 
+    # ⬇️ CLAVE: PASAR EL VÍDEO BASE AL WORKER
+    base_video_url = open(os.path.join(URLS, f"{job_id}_orig.txt")).read().strip()
+
     r = requests.post(
         f"https://api.runpod.ai/v2/{RUNPOD_WORKER_ENDPOINT_ID}/run",
         headers={
@@ -257,8 +258,9 @@ def translator_callback(body: TranslatorCallback):
         json={
             "input": {
                 "job_id": job_id,
-                "segments": segments,
                 "language": language,
+                "segments": segments,
+                "base_video_url": base_video_url,
             }
         },
     )
