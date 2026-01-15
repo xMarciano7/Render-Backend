@@ -6,7 +6,6 @@ import os
 import uuid
 import json
 import requests
-import time
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
@@ -70,6 +69,12 @@ class UploadURL(BaseModel):
     youtube_url: str
     subtitle_preset: dict
     languages: list[str] | None = None
+
+
+class TranslatorCallback(BaseModel):
+    job_id: str
+    language: str
+    segments: list[dict]
 
 
 # =========================
@@ -185,12 +190,10 @@ def progress(job_id: str):
         base_url = output.get("base_url")
         segments = output.get("segments")
 
-        # ⬇️ FIX CLAVE: NO marcar error si aún no llegaron
         if not base_url or not segments:
             write_progress(job_id, max(current, 60))
             return {"percent": read_progress(job_id)}
 
-        # Guardar original SOLO una vez
         orig_path = os.path.join(URLS, f"{job_id}_orig.txt")
         if not os.path.exists(orig_path):
             open(orig_path, "w").write(base_url)
@@ -229,10 +232,10 @@ def progress(job_id: str):
 
 
 @app.post("/translator-callback")
-def translator_callback(data: dict):
-    job_id = data["job_id"]
-    language = data["language"]
-    segments = data["segments"]
+def translator_callback(body: TranslatorCallback):
+    job_id = body.job_id
+    language = body.language
+    segments = body.segments
 
     seg_path = os.path.join(SEGS, f"{job_id}_{language}.json")
     json.dump(segments, open(seg_path, "w"))
