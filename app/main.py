@@ -21,7 +21,7 @@ RUNPOD_API_KEY = os.getenv("RUNPOD_API_KEY")
 RUNPOD_WORKER_ENDPOINT_ID = os.getenv("RUNPOD_ENDPOINT_ID")
 RUNPOD_TRANSLATOR_ENDPOINT_ID = os.getenv("RUNPOD_TRANSLATOR_ENDPOINT_ID")
 
-if not RUNPOD_API_KEY or not RUNPOD_WORKER_ENDPOINT_ID:
+if not RUNPOD_API_KEY or not RUNPOD_WORKER_ENDPOINT_ID or not RUNPOD_TRANSLATOR_ENDPOINT_ID:
     raise RuntimeError("RunPod env vars missing")
 
 
@@ -48,7 +48,7 @@ for p in (PROGRESS, URLS, PRESETS, META, SEGMENTS, RUNPOD_IDS, LANG_DONE):
 # APP
 # =========================
 
-app = FastAPI(title="ClipFile Backend", version="1.5")
+app = FastAPI(title="ClipFile Backend", version="1.6")
 
 app.add_middleware(
     CORSMiddleware,
@@ -189,7 +189,7 @@ def progress(job_id: str):
             langs = json.load(open(os.path.join(META, f"{job_id}.json"))).get("languages", [])
 
             for lang in langs:
-                tr = requests.post(
+                requests.post(
                     f"https://api.runpod.ai/v2/{RUNPOD_TRANSLATOR_ENDPOINT_ID}/run",
                     headers={
                         "Authorization": f"Bearer {RUNPOD_API_KEY}",
@@ -248,6 +248,10 @@ def translator_callback(body: TranslatorCallback):
         raise HTTPException(500, r.text)
 
     open(os.path.join(RUNPOD_IDS, f"{job_id}_{lang}.txt"), "w").write(r.json()["id"])
+    mark_lang_done(job_id, lang)
+
+    if all_langs_done(job_id):
+        write_progress(job_id, 100)
 
     return {"ok": True}
 
