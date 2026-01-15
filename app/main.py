@@ -1,232 +1,275 @@
+# =========================
+# render-backend/main.py
+# =========================
+
 import os
-import subprocess
-import tempfile
-import traceback
 import uuid
+import json
+import requests
+import time
 
-import boto3
-from runpod.serverless import start
-from faster_whisper import WhisperModel
-
-
-# ================= CONFIG =================
-WHISPER_MODEL = "medium"
-DEVICE = "cuda"
-COMPUTE_TYPE = "float16"
-MAX_DURATION = "75"
-
-R2_BUCKET = os.getenv("R2_BUCKET")
-R2_ACCOUNT_ID = os.getenv("R2_ACCOUNT_ID")
-R2_ACCESS_KEY = os.getenv("R2_ACCESS_KEY")
-R2_SECRET_KEY = os.getenv("R2_SECRET_KEY")
-R2_PUBLIC_BASE = os.getenv("R2_PUBLIC_BASE")
-# =========================================
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+from fastapi.responses import RedirectResponse
+from fastapi.middleware.cors import CORSMiddleware
 
 
-def run(cmd):
-    p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    if p.returncode != 0:
-        raise RuntimeError(f"CMD FAILED:\n{' '.join(cmd)}\nSTDERR:\n{p.stderr}")
-    return p.stdout
+# =========================
+# ENV
+# =========================
+
+RUNPOD_API_KEY = os.getenv("RUNPOD_API_KEY")
+RUNPOD_WORKER_ENDPOINT_ID = os.getenv("RUNPOD_ENDPOINT_ID")
+RUNPOD_TRANSLATOR_ENDPOINT_ID = os.getenv("RUNPOD_TRANSLATOR_ENDPOINT_ID")
+
+if not RUNPOD_API_KEY or not RUNPOD_WORKER_ENDPOINT_ID:
+    raise RuntimeError("RUNPOD_API_KEY or RUNPOD_ENDPOINT_ID missing")
 
 
-def ts(t):
-    h = int(t // 3600)
-    m = int((t % 3600) // 60)
-    s = t % 60
-    return f"{h}:{m:02d}:{s:05.2f}"
+# =========================
+# PATHS
+# =========================
+
+BASE = os.path.dirname(os.path.abspath(__file__))
+STO = os.path.join(BASE, "storage")
+PRO = os.path.join(STO, "progress")
+URLS = os.path.join(STO, "urls")
+PRESETS = os.path.join(STO, "presets")
+META = os.path.join(STO, "meta")
+SEGS = os.path.join(STO, "segments")
+LANGDONE = os.path.join(STO, "lang_done")
+
+for p in (PRO, URLS, PRESETS, META, SEGS, LANGDONE):
+    os.makedirs(p, exist_ok=True)
 
 
-def ass_color(hex_color: str):
-    hex_color = hex_color.lstrip("#")
-    r = hex_color[0:2]
-    g = hex_color[2:4]
-    b = hex_color[4:6]
-    return f"&H00{b}{g}{r}"
+# =========================
+# APP
+# =========================
+
+app = FastAPI(title="ClipFile Backend", version="1.2")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "https://sgpwlh-my-site-teyd1jsn-othmanebenbrahim12.wix-vibe.com",
+        "http://localhost:3000",
+        "http://localhost:5173",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
-def ass_alignment(alignment: str):
-    if alignment == "left":
-        return 1
-    if alignment == "right":
-        return 3
-    return 2
+# =========================
+# MODELS
+# =========================
+
+class UploadURL(BaseModel):
+    youtube_url: str
+    subtitle_preset: dict
+    languages: list[str] | None = None
 
 
-def map_preset_to_ass(preset: dict):
-    font_size = int(preset["fontSize"] * 2)
-    play_res_y = 1920
-    margin_v = int((100 - preset["verticalPosition"]) / 100 * play_res_y)
+# =========================
+# PROGRESS HELPERS
+# =========================
 
-    return {
-        "font": preset["fontFamily"],
-        "font_size": font_size,
-        "bold": 1 if preset["fontWeight"] == "bold" else 0,
-        "italic": 1 if preset["fontStyle"] == "italic" else 0,
-        "text_color": ass_color(preset["textColor"]),
-        "outline_color": ass_color(preset["outlineColor"]),
-        "outline_size": int(preset["outlineThickness"]),
-        "alignment": ass_alignment(preset["horizontalAlignment"]),
-        "margin_v": margin_v,
-    }
-
-
-def generate_ass_from_words(words, ass_preset, path):
-    header = f"""[Script Info]
-ScriptType: v4.00+
-PlayResX: 1080
-PlayResY: 1920
-
-[V4+ Styles]
-Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,{ass_preset['font']},{ass_preset['font_size']},{ass_preset['text_color']},{ass_preset['text_color']},{ass_preset['outline_color']},&H00000000,{ass_preset['bold']},{ass_preset['italic']},1,{ass_preset['outline_size']},0,{ass_preset['alignment']},60,60,{ass_preset['margin_v']},1
-
-[Events]
-Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
-"""
-    lines = []
-    for w in words:
-        lines.append(
-            f"Dialogue: 0,{ts(w['start'])},{ts(w['end'])},Default,,0,0,0,,{w['word'].upper()}"
-        )
-
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(header + "\n".join(lines))
-
-
-def generate_ass_from_segments(segments, ass_preset, path):
-    header = f"""[Script Info]
-ScriptType: v4.00+
-PlayResX: 1080
-PlayResY: 1920
-
-[V4+ Styles]
-Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,{ass_preset['font']},{ass_preset['font_size']},{ass_preset['text_color']},{ass_preset['text_color']},{ass_preset['outline_color']},&H00000000,{ass_preset['bold']},{ass_preset['italic']},1,{ass_preset['outline_size']},0,{ass_preset['alignment']},60,60,{ass_preset['margin_v']},1
-
-[Events]
-Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
-"""
-    lines = []
-    for s in segments:
-        lines.append(
-            f"Dialogue: 0,{ts(s['start'])},{ts(s['end'])},Default,,0,0,0,,{s['text'].upper()}"
-        )
-
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(header + "\n".join(lines))
-
-
-def download_video(url, output_path):
-    if "youtube.com" in url or "youtu.be" in url:
-        run(["yt-dlp", "-f", "mp4", "-o", output_path, url])
-    else:
-        run(["curl", "-L", "--fail", url, "-o", output_path])
-
-
-def handler(event):
+def write_progress(job_id: str, value: int):
+    path = os.path.join(PRO, f"{job_id}.txt")
     try:
-        data = event["input"]
-
-        preset = data["subtitle_preset"]
-        ass_preset = map_preset_to_ass(preset)
-
-        tmp = tempfile.mkdtemp()
-        input_mp4 = os.path.join(tmp, "input.mp4")
-        subs_ass = os.path.join(tmp, "subs.ass")
-        output_mp4 = os.path.join(tmp, "output.mp4")
-
-        # ========= MODO 1: JOB ORIGINAL =========
-        if "youtube_url" in data:
-            youtube_url = data["youtube_url"]
-
-            audio_wav = os.path.join(tmp, "audio.wav")
-            download_video(youtube_url, input_mp4)
-
-            run([
-                "ffmpeg", "-y",
-                "-i", input_mp4,
-                "-t", MAX_DURATION,
-                "-ac", "1",
-                "-ar", "16000",
-                audio_wav
-            ])
-
-            model = WhisperModel(WHISPER_MODEL, device=DEVICE, compute_type=COMPUTE_TYPE)
-            segments, _ = model.transcribe(audio_wav, word_timestamps=True)
-
-            words = []
-            segments_out = []
-
-            for seg in segments:
-                if seg.text:
-                    segments_out.append({
-                        "start": seg.start,
-                        "end": seg.end,
-                        "text": seg.text.strip()
-                    })
-
-                if seg.words:
-                    for w in seg.words:
-                        words.append({
-                            "start": w.start,
-                            "end": w.end,
-                            "word": w.word
-                        })
-
-            if not words:
-                raise RuntimeError("NO WORDS FROM WHISPER")
-
-            generate_ass_from_words(words, ass_preset, subs_ass)
-
-        # ========= MODO 2: JOB TRADUCIDO =========
-        else:
-            segments_out = data["segments"]
-            base_video_url = data["base_video_url"]
-
-            download_video(base_video_url, input_mp4)
-            generate_ass_from_segments(segments_out, ass_preset, subs_ass)
-
-        run([
-            "ffmpeg", "-y",
-            "-i", input_mp4,
-            "-t", MAX_DURATION,
-            "-filter_complex",
-            (
-                "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,"
-                "crop=1080:1920,boxblur=20:1[bg];"
-                "[0:v]scale=1080:-1:force_original_aspect_ratio=decrease[fg];"
-                "[bg][fg]overlay=(W-w)/2:(H-h)/2,ass=" + subs_ass
-            ),
-            "-c:a", "copy",
-            output_mp4
-        ])
-
-        s3 = boto3.client(
-            "s3",
-            endpoint_url=f"https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com",
-            aws_access_key_id=R2_ACCESS_KEY,
-            aws_secret_access_key=R2_SECRET_KEY,
-            region_name="auto"
-        )
-
-        key = f"clips/{uuid.uuid4()}.mp4"
-        s3.upload_file(
-            output_mp4,
-            R2_BUCKET,
-            key,
-            ExtraArgs={"ContentType": "video/mp4"}
-        )
-
-        return {
-            "status": "ok",
-            "base_url": f"{R2_PUBLIC_BASE}/{key}",
-            "segments": segments_out
-        }
-
-    except Exception:
-        print(traceback.format_exc())
-        raise
+        current = int(open(path).read())
+        if current >= value:
+            return
+    except:
+        pass
+    with open(path, "w") as f:
+        f.write(str(value))
 
 
-start({"handler": handler})
+def read_progress(job_id: str) -> int:
+    try:
+        return int(open(os.path.join(PRO, f"{job_id}.txt")).read())
+    except:
+        return -1
+
+
+def mark_language_done(job_id: str, lang: str):
+    path = os.path.join(LANGDONE, f"{job_id}.json")
+    done = []
+    if os.path.exists(path):
+        done = json.load(open(path))
+    if lang not in done:
+        done.append(lang)
+    with open(path, "w") as f:
+        json.dump(done, f)
+
+
+def all_languages_done(job_id: str) -> bool:
+    meta = json.load(open(os.path.join(META, f"{job_id}.json")))
+    langs = meta.get("languages", [])
+    path = os.path.join(LANGDONE, f"{job_id}.json")
+    if not os.path.exists(path):
+        return False
+    done = json.load(open(path))
+    return set(done) == set(langs)
+
+
+# =========================
+# ROUTES
+# =========================
+
+@app.post("/upload")
+def upload_url(body: UploadURL):
+    job_id = str(uuid.uuid4())
+    write_progress(job_id, 5)
+
+    json.dump(body.subtitle_preset, open(os.path.join(PRESETS, f"{job_id}.json"), "w"))
+    json.dump({"languages": body.languages or []}, open(os.path.join(META, f"{job_id}.json"), "w"))
+
+    r = requests.post(
+        f"https://api.runpod.ai/v2/{RUNPOD_WORKER_ENDPOINT_ID}/run",
+        headers={
+            "Authorization": f"Bearer {RUNPOD_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "input": {
+                "job_id": job_id,
+                "youtube_url": body.youtube_url,
+                "subtitle_preset": body.subtitle_preset,
+            }
+        },
+        timeout=20,
+    )
+
+    if r.status_code != 200:
+        write_progress(job_id, -1)
+        raise HTTPException(500, r.text)
+
+    runpod_id = r.json()["id"]
+    open(os.path.join(PRO, f"{job_id}.runpod"), "w").write(runpod_id)
+
+    write_progress(job_id, 20)
+    return {"job_id": job_id}
+
+
+@app.get("/progress/{job_id}")
+def progress(job_id: str):
+    current = read_progress(job_id)
+    if current in (100, -1):
+        return {"percent": current}
+
+    meta = os.path.join(PRO, f"{job_id}.runpod")
+    if not os.path.exists(meta):
+        return {"percent": current}
+
+    runpod_id = open(meta).read().strip()
+
+    r = requests.get(
+        f"https://api.runpod.ai/v2/{RUNPOD_WORKER_ENDPOINT_ID}/status/{runpod_id}",
+        headers={"Authorization": f"Bearer {RUNPOD_API_KEY}"},
+        timeout=10,
+    )
+
+    if r.status_code != 200:
+        return {"percent": current}
+
+    data = r.json()
+    status = data.get("status")
+
+    if status == "COMPLETED":
+        output = data.get("output") or {}
+
+        base_url = output.get("base_url")
+        segments = output.get("segments")
+
+        # ⬇️ FIX CLAVE: NO marcar error si aún no llegaron
+        if not base_url or not segments:
+            write_progress(job_id, max(current, 60))
+            return {"percent": read_progress(job_id)}
+
+        # Guardar original SOLO una vez
+        orig_path = os.path.join(URLS, f"{job_id}_orig.txt")
+        if not os.path.exists(orig_path):
+            open(orig_path, "w").write(base_url)
+            json.dump(segments, open(os.path.join(SEGS, f"{job_id}_orig.json"), "w"))
+
+            languages = json.load(open(os.path.join(META, f"{job_id}.json"))).get("languages", [])
+
+            if languages and RUNPOD_TRANSLATOR_ENDPOINT_ID:
+                for lang in languages:
+                    requests.post(
+                        f"https://api.runpod.ai/v2/{RUNPOD_TRANSLATOR_ENDPOINT_ID}/run",
+                        headers={
+                            "Authorization": f"Bearer {RUNPOD_API_KEY}",
+                            "Content-Type": "application/json",
+                        },
+                        json={
+                            "input": {
+                                "job_id": job_id,
+                                "source_language": "spa_Latn",
+                                "target_language": lang,
+                                "segments": segments,
+                                "callback": "https://render-backend-1-xa46.onrender.com/translator-callback",
+                            }
+                        },
+                    )
+                write_progress(job_id, 80)
+            else:
+                write_progress(job_id, 100)
+
+    elif status == "FAILED":
+        write_progress(job_id, -1)
+    else:
+        write_progress(job_id, max(current, 50))
+
+    return {"percent": read_progress(job_id)}
+
+
+@app.post("/translator-callback")
+def translator_callback(data: dict):
+    job_id = data["job_id"]
+    language = data["language"]
+    segments = data["segments"]
+
+    seg_path = os.path.join(SEGS, f"{job_id}_{language}.json")
+    json.dump(segments, open(seg_path, "w"))
+
+    r = requests.post(
+        f"https://api.runpod.ai/v2/{RUNPOD_WORKER_ENDPOINT_ID}/run",
+        headers={
+            "Authorization": f"Bearer {RUNPOD_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "input": {
+                "job_id": job_id,
+                "segments": segments,
+                "language": language,
+            }
+        },
+    )
+
+    if r.status_code != 200:
+        raise HTTPException(500, r.text)
+
+    url = r.json()["output"]["base_url"]
+    open(os.path.join(URLS, f"{job_id}_{language}.txt"), "w").write(url)
+
+    mark_language_done(job_id, language)
+
+    if all_languages_done(job_id):
+        write_progress(job_id, 100)
+
+    return {"ok": True}
+
+
+@app.get("/download/{job_id}")
+def download(job_id: str, lang: str | None = None):
+    suffix = lang or "orig"
+    path = os.path.join(URLS, f"{job_id}_{suffix}.txt")
+    if not os.path.exists(path):
+        raise HTTPException(404, "Not ready")
+    return RedirectResponse(open(path).read().strip())
