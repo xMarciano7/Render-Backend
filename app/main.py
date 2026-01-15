@@ -6,6 +6,7 @@ import os
 import uuid
 import json
 import requests
+import time
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
@@ -184,36 +185,40 @@ def progress(job_id: str):
         base_url = output.get("base_url")
         segments = output.get("segments")
 
+        # ⬇️ FIX CLAVE: NO marcar error si aún no llegaron
         if not base_url or not segments:
-            write_progress(job_id, -1)
-            return {"percent": -1}
+            write_progress(job_id, max(current, 60))
+            return {"percent": read_progress(job_id)}
 
-        open(os.path.join(URLS, f"{job_id}_orig.txt"), "w").write(base_url)
-        json.dump(segments, open(os.path.join(SEGS, f"{job_id}_orig.json"), "w"))
+        # Guardar original SOLO una vez
+        orig_path = os.path.join(URLS, f"{job_id}_orig.txt")
+        if not os.path.exists(orig_path):
+            open(orig_path, "w").write(base_url)
+            json.dump(segments, open(os.path.join(SEGS, f"{job_id}_orig.json"), "w"))
 
-        languages = json.load(open(os.path.join(META, f"{job_id}.json"))).get("languages", [])
+            languages = json.load(open(os.path.join(META, f"{job_id}.json"))).get("languages", [])
 
-        if languages and RUNPOD_TRANSLATOR_ENDPOINT_ID:
-            for lang in languages:
-                requests.post(
-                    f"https://api.runpod.ai/v2/{RUNPOD_TRANSLATOR_ENDPOINT_ID}/run",
-                    headers={
-                        "Authorization": f"Bearer {RUNPOD_API_KEY}",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "input": {
-                            "job_id": job_id,
-                            "source_language": "spa_Latn",
-                            "target_language": lang,
-                            "segments": segments,
-                            "callback": "https://render-backend-1-xa46.onrender.com/translator-callback",
-                        }
-                    },
-                )
-            write_progress(job_id, 80)
-        else:
-            write_progress(job_id, 100)
+            if languages and RUNPOD_TRANSLATOR_ENDPOINT_ID:
+                for lang in languages:
+                    requests.post(
+                        f"https://api.runpod.ai/v2/{RUNPOD_TRANSLATOR_ENDPOINT_ID}/run",
+                        headers={
+                            "Authorization": f"Bearer {RUNPOD_API_KEY}",
+                            "Content-Type": "application/json",
+                        },
+                        json={
+                            "input": {
+                                "job_id": job_id,
+                                "source_language": "spa_Latn",
+                                "target_language": lang,
+                                "segments": segments,
+                                "callback": "https://render-backend-1-xa46.onrender.com/translator-callback",
+                            }
+                        },
+                    )
+                write_progress(job_id, 80)
+            else:
+                write_progress(job_id, 100)
 
     elif status == "FAILED":
         write_progress(job_id, -1)
