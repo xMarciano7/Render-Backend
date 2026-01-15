@@ -37,10 +37,11 @@ URLS = os.path.join(STORE, "urls")
 PRESETS = os.path.join(STORE, "presets")
 META = os.path.join(STORE, "meta")
 SEGMENTS = os.path.join(STORE, "segments")
+WORDS = os.path.join(STORE, "words")
 RUNPOD_IDS = os.path.join(STORE, "runpod_ids")
 LANG_DONE = os.path.join(STORE, "lang_done")
 
-for p in (PROGRESS, URLS, PRESETS, META, SEGMENTS, RUNPOD_IDS, LANG_DONE):
+for p in (PROGRESS, URLS, PRESETS, META, SEGMENTS, WORDS, RUNPOD_IDS, LANG_DONE):
     os.makedirs(p, exist_ok=True)
 
 
@@ -48,7 +49,7 @@ for p in (PROGRESS, URLS, PRESETS, META, SEGMENTS, RUNPOD_IDS, LANG_DONE):
 # APP
 # =========================
 
-app = FastAPI(title="ClipFile Backend", version="1.6")
+app = FastAPI(title="ClipFile Backend", version="1.7")
 
 app.add_middleware(
     CORSMiddleware,
@@ -72,7 +73,7 @@ class UploadURL(BaseModel):
 class TranslatorCallback(BaseModel):
     job_id: str
     language: str
-    segments: list[dict]
+    words: list[dict]
 
 
 # =========================
@@ -181,10 +182,12 @@ def progress(job_id: str):
         out = data.get("output", {})
         base_url = out.get("base_url")
         segments = out.get("segments")
+        words = out.get("words")
 
-        if base_url and segments:
+        if base_url and segments and words:
             open(os.path.join(URLS, f"{job_id}_orig.txt"), "w").write(base_url)
             json.dump(segments, open(os.path.join(SEGMENTS, f"{job_id}_orig.json"), "w"))
+            json.dump(words, open(os.path.join(WORDS, f"{job_id}_orig.json"), "w"))
 
             langs = json.load(open(os.path.join(META, f"{job_id}.json"))).get("languages", [])
 
@@ -222,9 +225,9 @@ def progress(job_id: str):
 def translator_callback(body: TranslatorCallback):
     job_id = body.job_id
     lang = body.language
-    segments = body.segments
+    words = body.words
 
-    json.dump(segments, open(os.path.join(SEGMENTS, f"{job_id}_{lang}.json"), "w"))
+    json.dump(words, open(os.path.join(WORDS, f"{job_id}_{lang}.json"), "w"))
 
     base_video_url = open(os.path.join(URLS, f"{job_id}_orig.txt")).read().strip()
 
@@ -238,7 +241,7 @@ def translator_callback(body: TranslatorCallback):
             "input": {
                 "job_id": job_id,
                 "language": lang,
-                "segments": segments,
+                "words": words,
                 "base_video_url": base_video_url,
             }
         },
