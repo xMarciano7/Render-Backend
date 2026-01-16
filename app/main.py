@@ -6,6 +6,7 @@ import os
 import uuid
 import json
 import requests
+import boto3
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import RedirectResponse
@@ -21,8 +22,17 @@ RUNPOD_API_KEY = os.getenv("RUNPOD_API_KEY")
 RUNPOD_WORKER_ENDPOINT_ID = os.getenv("RUNPOD_ENDPOINT_ID")
 RUNPOD_TRANSLATOR_ENDPOINT_ID = os.getenv("RUNPOD_TRANSLATOR_ENDPOINT_ID")
 
+R2_BUCKET = os.getenv("R2_BUCKET")
+R2_ACCOUNT_ID = os.getenv("R2_ACCOUNT_ID")
+R2_ACCESS_KEY = os.getenv("R2_ACCESS_KEY")
+R2_SECRET_KEY = os.getenv("R2_SECRET_KEY")
+R2_PUBLIC_BASE = os.getenv("R2_PUBLIC_BASE")
+
 if not RUNPOD_API_KEY or not RUNPOD_WORKER_ENDPOINT_ID or not RUNPOD_TRANSLATOR_ENDPOINT_ID:
     raise RuntimeError("RunPod env vars missing")
+
+if not R2_BUCKET or not R2_ACCOUNT_ID or not R2_ACCESS_KEY or not R2_SECRET_KEY or not R2_PUBLIC_BASE:
+    raise RuntimeError("R2 env vars missing")
 
 
 # =========================
@@ -48,7 +58,7 @@ for p in (PROGRESS, URLS, PRESETS, META, WORDS, RUNPOD_IDS, LANG_DONE):
 # APP
 # =========================
 
-app = FastAPI(title="ClipFile Backend", version="1.7")
+app = FastAPI(title="ClipFile Backend", version="1.8")
 
 app.add_middleware(
     CORSMiddleware,
@@ -115,9 +125,42 @@ def all_langs_done(job_id: str) -> bool:
     return set(done) == set(langs)
 
 
+def r2_client():
+    return boto3.client(
+        "s3",
+        endpoint_url=f"https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com",
+        aws_access_key_id=R2_ACCESS_KEY,
+        aws_secret_access_key=R2_SECRET_KEY,
+        region_name="auto"
+    )
+
+
 # =========================
 # ROUTES
 # =========================
+
+@app.post("/upload-url")
+def get_upload_url():
+    job_id = str(uuid.uuid4())
+    key = f"uploads/{job_id}.mp4"
+
+    s3 = r2_client()
+    upload_url = s3.generate_presigned_url(
+        ClientMethod="put_object",
+        Params={
+            "Bucket": R2_BUCKET,
+            "Key": key,
+            "ContentType": "video/mp4",
+        },
+        ExpiresIn=3600,
+    )
+
+    return {
+        "job_id": job_id,
+        "upload_url": upload_url,
+        "video_url": f"{R2_PUBLIC_BASE}/{key}",
+    }
+
 
 @app.post("/upload")
 def upload(body: UploadURL):
@@ -200,7 +243,7 @@ def progress(job_id: str):
                             "job_id": job_id,
                             "source_language": "spa_Latn",
                             "target_language": lang,
-                            "segments": words,
+                            "words": words,
                             "callback": "https://render-backend-1-xa46.onrender.com/translator-callback",
                         }
                     },
