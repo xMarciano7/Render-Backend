@@ -3,5 +3,3 @@ uvicorn
 requests
 python-multipart
 boto3
-yt-dlp
-
