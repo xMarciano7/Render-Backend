@@ -48,7 +48,7 @@ for p in (PROGRESS, URLS, PRESETS, META, SEGMENTS, RUNPOD_IDS, LANG_DONE):
 # APP
 # =========================
 
-app = FastAPI(title="ClipFile Backend", version="1.8")
+app = FastAPI(title="ClipFile Backend", version="1.9")
 
 app.add_middleware(
     CORSMiddleware,
@@ -140,7 +140,7 @@ def upload(body: UploadURL):
                 "subtitle_preset": body.subtitle_preset,
             }
         },
-        timeout=20,
+        timeout=30,
     )
 
     if r.status_code != 200:
@@ -182,7 +182,6 @@ def progress(job_id: str):
         base_url = out.get("base_url")
         segments = out.get("segments")
 
-        # 🔧 CLAVE: solo necesitamos segments para lanzar el translator
         if base_url and segments:
             open(os.path.join(URLS, f"{job_id}_orig.txt"), "w").write(base_url)
             json.dump(segments, open(os.path.join(SEGMENTS, f"{job_id}_orig.json"), "w"))
@@ -205,6 +204,7 @@ def progress(job_id: str):
                             "callback": "https://render-backend-1-xa46.onrender.com/translator-callback",
                         }
                     },
+                    timeout=30,
                 )
 
             write_progress(job_id, 80)
@@ -239,8 +239,11 @@ def translator_callback(body: TranslatorCallback):
                 "language": lang,
                 "words": words,
                 "base_video_url": base_video_url,
+                "disable_original_subs": True,
+                "word_level": True,
             }
         },
+        timeout=30,
     )
 
     if r.status_code != 200:
