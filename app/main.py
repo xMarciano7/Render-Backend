@@ -49,9 +49,13 @@ META = os.path.join(STORE, "meta")
 WORDS = os.path.join(STORE, "words")
 RUNPOD_IDS = os.path.join(STORE, "runpod_ids")
 LANG_DONE = os.path.join(STORE, "lang_done")
-CLEAN_URLS = os.path.join(STORE, "clean_urls")  # <-- AÑADIDO (base limpia)
+CLEAN_URLS = os.path.join(STORE, "clean_urls")
+TRANSLATED_TEXTS = os.path.join(STORE, "translated_texts")  # <-- AÑADIDO
 
-for p in (PROGRESS, URLS, PRESETS, META, WORDS, RUNPOD_IDS, LANG_DONE, CLEAN_URLS):
+for p in (
+    PROGRESS, URLS, PRESETS, META, WORDS,
+    RUNPOD_IDS, LANG_DONE, CLEAN_URLS, TRANSLATED_TEXTS
+):
     os.makedirs(p, exist_ok=True)
 
 
@@ -59,7 +63,7 @@ for p in (PROGRESS, URLS, PRESETS, META, WORDS, RUNPOD_IDS, LANG_DONE, CLEAN_URL
 # APP
 # =========================
 
-app = FastAPI(title="ClipFile Backend", version="1.9")
+app = FastAPI(title="ClipFile Backend", version="2.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -83,7 +87,7 @@ class UploadURL(BaseModel):
 class TranslatorCallback(BaseModel):
     job_id: str
     language: str
-    words: list[dict]
+    text: str   # <-- AÑADIDO (texto plano traducido)
 
 
 # =========================
@@ -117,8 +121,7 @@ def mark_lang_done(job_id: str, lang: str):
 
 
 def all_langs_done(job_id: str) -> bool:
-    meta = json.load(open(os.path.join(META, f"{job_id}.json")))
-    langs = meta.get("languages", [])
+    langs = json.load(open(os.path.join(META, f"{job_id}.json"))).get("languages", [])
     if not langs:
         return True
     path = os.path.join(LANG_DONE, f"{job_id}.json")
@@ -170,14 +173,10 @@ def upload(body: UploadURL):
     job_id = str(uuid.uuid4())
     write_progress(job_id, 5)
 
-    # Guardar preset y idiomas
     json.dump(body.subtitle_preset, open(os.path.join(PRESETS, f"{job_id}.json"), "w"))
     json.dump({"languages": body.languages or []}, open(os.path.join(META, f"{job_id}.json"), "w"))
-
-    # AÑADIDO: guardar URL LIMPIA del MP4 original (sin subtítulos)
     open(os.path.join(CLEAN_URLS, f"{job_id}.txt"), "w").write(body.video_url)
 
-    # Lanzar worker para clip ORIGINAL (con subtítulos originales)
     r = requests.post(
         f"https://api.runpod.ai/v2/{RUNPOD_WORKER_ENDPOINT_ID}/run",
         headers={
@@ -234,13 +233,12 @@ def progress(job_id: str):
         words = out.get("words")
 
         if base_url and words:
-            # Guardar clip ORIGINAL y words
             open(os.path.join(URLS, f"{job_id}_orig.txt"), "w").write(base_url)
             json.dump(words, open(os.path.join(WORDS, f"{job_id}_orig.json"), "w"))
 
+            texts = [" ".join(w["word"] for w in words)]
             langs = json.load(open(os.path.join(META, f"{job_id}.json"))).get("languages", [])
 
-            # Lanzar traducciones (solo si hay idiomas)
             for lang in langs:
                 requests.post(
                     f"https://api.runpod.ai/v2/{RUNPOD_TRANSLATOR_ENDPOINT_ID}/run",
@@ -253,7 +251,7 @@ def progress(job_id: str):
                             "job_id": job_id,
                             "source_language": "spa_Latn",
                             "target_language": lang,
-                            "words": words,
+                            "texts": texts,
                             "callback": "https://render-backend-1-xa46.onrender.com/translator-callback",
                         }
                     },
@@ -275,12 +273,10 @@ def progress(job_id: str):
 def translator_callback(body: TranslatorCallback):
     job_id = body.job_id
     lang = body.language
-    words = body.words
+    text = body.text
 
-    # Guardar words traducidas
-    json.dump(words, open(os.path.join(WORDS, f"{job_id}_{lang}.json"), "w"))
+    open(os.path.join(TRANSLATED_TEXTS, f"{job_id}_{lang}.txt"), "w").write(text)
 
-    # AÑADIDO: usar SIEMPRE la base LIMPIA (MP4 original) para renderizar traducidos
     clean_base_video_url = open(os.path.join(CLEAN_URLS, f"{job_id}.txt")).read().strip()
 
     r = requests.post(
@@ -293,8 +289,8 @@ def translator_callback(body: TranslatorCallback):
             "input": {
                 "job_id": job_id,
                 "language": lang,
-                "words": words,
                 "base_video_url": clean_base_video_url,
+                "translated_text": text,
             }
         },
     )
