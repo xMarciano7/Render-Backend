@@ -49,8 +49,9 @@ META = os.path.join(STORE, "meta")
 WORDS = os.path.join(STORE, "words")
 RUNPOD_IDS = os.path.join(STORE, "runpod_ids")
 LANG_DONE = os.path.join(STORE, "lang_done")
+CLEAN_URLS = os.path.join(STORE, "clean_urls")  # <-- AÑADIDO (base limpia)
 
-for p in (PROGRESS, URLS, PRESETS, META, WORDS, RUNPOD_IDS, LANG_DONE):
+for p in (PROGRESS, URLS, PRESETS, META, WORDS, RUNPOD_IDS, LANG_DONE, CLEAN_URLS):
     os.makedirs(p, exist_ok=True)
 
 
@@ -58,7 +59,7 @@ for p in (PROGRESS, URLS, PRESETS, META, WORDS, RUNPOD_IDS, LANG_DONE):
 # APP
 # =========================
 
-app = FastAPI(title="ClipFile Backend", version="1.8")
+app = FastAPI(title="ClipFile Backend", version="1.9")
 
 app.add_middleware(
     CORSMiddleware,
@@ -118,6 +119,8 @@ def mark_lang_done(job_id: str, lang: str):
 def all_langs_done(job_id: str) -> bool:
     meta = json.load(open(os.path.join(META, f"{job_id}.json")))
     langs = meta.get("languages", [])
+    if not langs:
+        return True
     path = os.path.join(LANG_DONE, f"{job_id}.json")
     if not os.path.exists(path):
         return False
@@ -167,9 +170,14 @@ def upload(body: UploadURL):
     job_id = str(uuid.uuid4())
     write_progress(job_id, 5)
 
+    # Guardar preset y idiomas
     json.dump(body.subtitle_preset, open(os.path.join(PRESETS, f"{job_id}.json"), "w"))
     json.dump({"languages": body.languages or []}, open(os.path.join(META, f"{job_id}.json"), "w"))
 
+    # AÑADIDO: guardar URL LIMPIA del MP4 original (sin subtítulos)
+    open(os.path.join(CLEAN_URLS, f"{job_id}.txt"), "w").write(body.video_url)
+
+    # Lanzar worker para clip ORIGINAL (con subtítulos originales)
     r = requests.post(
         f"https://api.runpod.ai/v2/{RUNPOD_WORKER_ENDPOINT_ID}/run",
         headers={
@@ -226,11 +234,13 @@ def progress(job_id: str):
         words = out.get("words")
 
         if base_url and words:
+            # Guardar clip ORIGINAL y words
             open(os.path.join(URLS, f"{job_id}_orig.txt"), "w").write(base_url)
             json.dump(words, open(os.path.join(WORDS, f"{job_id}_orig.json"), "w"))
 
             langs = json.load(open(os.path.join(META, f"{job_id}.json"))).get("languages", [])
 
+            # Lanzar traducciones (solo si hay idiomas)
             for lang in langs:
                 requests.post(
                     f"https://api.runpod.ai/v2/{RUNPOD_TRANSLATOR_ENDPOINT_ID}/run",
@@ -267,9 +277,11 @@ def translator_callback(body: TranslatorCallback):
     lang = body.language
     words = body.words
 
+    # Guardar words traducidas
     json.dump(words, open(os.path.join(WORDS, f"{job_id}_{lang}.json"), "w"))
 
-    base_video_url = open(os.path.join(URLS, f"{job_id}_orig.txt")).read().strip()
+    # AÑADIDO: usar SIEMPRE la base LIMPIA (MP4 original) para renderizar traducidos
+    clean_base_video_url = open(os.path.join(CLEAN_URLS, f"{job_id}.txt")).read().strip()
 
     r = requests.post(
         f"https://api.runpod.ai/v2/{RUNPOD_WORKER_ENDPOINT_ID}/run",
@@ -282,7 +294,7 @@ def translator_callback(body: TranslatorCallback):
                 "job_id": job_id,
                 "language": lang,
                 "words": words,
-                "base_video_url": base_video_url,
+                "base_video_url": clean_base_video_url,
             }
         },
     )
