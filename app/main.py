@@ -65,7 +65,7 @@ for p in (
 # APP
 # =========================
 
-app = FastAPI(title="ClipFile Backend", version="2.6")
+app = FastAPI(title="ClipFile Backend", version="2.6.1")
 
 app.add_middleware(
     CORSMiddleware,
@@ -81,6 +81,7 @@ app.add_middleware(
 # =========================
 
 class UploadURL(BaseModel):
+    job_id: str | None = None          # <-- AÑADIDO (no rompe nada)
     video_url: str
     subtitle_preset_original: dict
     subtitle_preset_translated: dict
@@ -181,7 +182,11 @@ def upload_url():
 
 @app.post("/upload")
 def upload(body: UploadURL):
-    job_id = str(uuid.uuid4())
+    # =========================
+    # FIX ÚNICO: REUTILIZAR job_id
+    # =========================
+    job_id = body.job_id or str(uuid.uuid4())
+
     write_progress(job_id, 5)
 
     json.dump(
