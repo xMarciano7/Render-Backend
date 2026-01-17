@@ -65,7 +65,7 @@ for p in (
 # APP
 # =========================
 
-app = FastAPI(title="ClipFile Backend", version="2.6.1")
+app = FastAPI(title="ClipFile Backend", version="2.4")
 
 app.add_middleware(
     CORSMiddleware,
@@ -81,7 +81,6 @@ app.add_middleware(
 # =========================
 
 class UploadURL(BaseModel):
-    job_id: str | None = None          # <-- AÑADIDO (no rompe nada)
     video_url: str
     subtitle_preset_original: dict
     subtitle_preset_translated: dict
@@ -158,12 +157,12 @@ def r2_client():
 # =========================
 
 @app.post("/upload-url")
-def upload_url():
+def get_upload_url():
     job_id = str(uuid.uuid4())
     key = f"uploads/{job_id}.mp4"
 
     s3 = r2_client()
-    signed = s3.generate_presigned_url(
+    upload_url = s3.generate_presigned_url(
         ClientMethod="put_object",
         Params={
             "Bucket": R2_BUCKET,
@@ -175,18 +174,14 @@ def upload_url():
 
     return {
         "job_id": job_id,
-        "upload_url": signed,
+        "upload_url": upload_url,
         "video_url": f"{R2_PUBLIC_BASE}/{key}",
     }
 
 
 @app.post("/upload")
 def upload(body: UploadURL):
-    # =========================
-    # FIX ÚNICO: REUTILIZAR job_id
-    # =========================
-    job_id = body.job_id or str(uuid.uuid4())
-
+    job_id = str(uuid.uuid4())
     write_progress(job_id, 5)
 
     json.dump(
@@ -236,66 +231,52 @@ def progress(job_id: str):
     if percent in (100, -1):
         return {"percent": percent}
 
-    # ORIGINAL
     orig_id_path = os.path.join(RUNPOD_IDS, f"{job_id}_orig.txt")
-    if os.path.exists(orig_id_path) and not has_flag(job_id, "orig_done"):
-        runpod_id = open(orig_id_path).read().strip()
-        r = requests.get(
-            f"https://api.runpod.ai/v2/{RUNPOD_WORKER_ENDPOINT_ID}/status/{runpod_id}",
-            headers={"Authorization": f"Bearer {RUNPOD_API_KEY}"},
-            timeout=10,
-        )
+    if not os.path.exists(orig_id_path):
+        return {"percent": percent}
 
-        if r.status_code == 200 and r.json().get("status") == "COMPLETED":
-            out = r.json().get("output", {})
-            if out.get("base_url") and out.get("words"):
-                open(os.path.join(URLS, f"{job_id}_orig.txt"), "w").write(out["base_url"])
-                json.dump(out["words"], open(os.path.join(WORDS, f"{job_id}_orig.json"), "w"))
+    runpod_id = open(orig_id_path).read().strip()
 
-                langs = json.load(open(os.path.join(META, f"{job_id}.json"))).get("languages", [])
-                for lang in langs:
-                    requests.post(
-                        f"https://api.runpod.ai/v2/{RUNPOD_TRANSLATOR_ENDPOINT_ID}/run",
-                        headers={
-                            "Authorization": f"Bearer {RUNPOD_API_KEY}",
-                            "Content-Type": "application/json",
-                        },
-                        json={
-                            "input": {
-                                "job_id": job_id,
-                                "source_language": "spa_Latn",
-                                "target_language": lang,
-                                "words": out["words"],
-                                "callback": "https://render-backend-1-xa46.onrender.com/translator-callback",
-                            }
-                        },
-                    )
+    r = requests.get(
+        f"https://api.runpod.ai/v2/{RUNPOD_WORKER_ENDPOINT_ID}/status/{runpod_id}",
+        headers={"Authorization": f"Bearer {RUNPOD_API_KEY}"},
+        timeout=10,
+    )
 
-                set_flag(job_id, "orig_done")
-                write_progress(job_id, 80)
+    if r.status_code != 200:
+        return {"percent": percent}
 
-    # TRANSLATED
-    langs = json.load(open(os.path.join(META, f"{job_id}.json"))).get("languages", [])
-    for lang in langs:
-        pid = os.path.join(RUNPOD_IDS, f"{job_id}_{lang}.txt")
-        if not os.path.exists(pid):
-            continue
+    data = r.json()
+    if data.get("status") == "COMPLETED" and not has_flag(job_id, "translator_started"):
+        out = data.get("output", {})
+        base_url = out.get("base_url")
+        words = out.get("words")
 
-        runpod_id = open(pid).read().strip()
-        r = requests.get(
-            f"https://api.runpod.ai/v2/{RUNPOD_WORKER_ENDPOINT_ID}/status/{runpod_id}",
-            headers={"Authorization": f"Bearer {RUNPOD_API_KEY}"},
-            timeout=10,
-        )
+        if base_url and words:
+            open(os.path.join(URLS, f"{job_id}_orig.txt"), "w").write(base_url)
+            json.dump(words, open(os.path.join(WORDS, f"{job_id}_orig.json"), "w"))
 
-        if r.status_code == 200 and r.json().get("status") == "COMPLETED":
-            out = r.json().get("output", {})
-            if out.get("base_url"):
-                open(os.path.join(URLS, f"{job_id}_{lang}.txt"), "w").write(out["base_url"])
-                mark_lang_done(job_id, lang)
+            langs = json.load(open(os.path.join(META, f"{job_id}.json"))).get("languages", [])
+            for lang in langs:
+                requests.post(
+                    f"https://api.runpod.ai/v2/{RUNPOD_TRANSLATOR_ENDPOINT_ID}/run",
+                    headers={
+                        "Authorization": f"Bearer {RUNPOD_API_KEY}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "input": {
+                            "job_id": job_id,
+                            "source_language": "spa_Latn",
+                            "target_language": lang,
+                            "words": words,
+                            "callback": "https://render-backend-1-xa46.onrender.com/translator-callback",
+                        }
+                    },
+                )
 
-    if all_langs_done(job_id):
-        write_progress(job_id, 100)
+            set_flag(job_id, "translator_started")
+            write_progress(job_id, 80)
 
     return {"percent": read_progress(job_id)}
 
@@ -309,7 +290,9 @@ def translator_callback(body: TranslatorCallback):
     json.dump(blocks, open(os.path.join(BLOCKS, f"{job_id}_{lang}.json"), "w"))
 
     clean_video_url = open(os.path.join(CLEAN_URLS, f"{job_id}.txt")).read().strip()
-    preset_translated = json.load(open(os.path.join(PRESETS, f"{job_id}.json")))["translated"]
+    preset_translated = json.load(
+        open(os.path.join(PRESETS, f"{job_id}.json"))
+    )["translated"]
 
     r = requests.post(
         f"https://api.runpod.ai/v2/{RUNPOD_WORKER_ENDPOINT_ID}/run",
@@ -332,6 +315,11 @@ def translator_callback(body: TranslatorCallback):
         raise HTTPException(500, r.text)
 
     open(os.path.join(RUNPOD_IDS, f"{job_id}_{lang}.txt"), "w").write(r.json()["id"])
+    mark_lang_done(job_id, lang)
+
+    if all_langs_done(job_id):
+        write_progress(job_id, 100)
+
     return {"ok": True}
 
 
