@@ -50,10 +50,11 @@ WORDS = os.path.join(STORE, "words")
 RUNPOD_IDS = os.path.join(STORE, "runpod_ids")
 LANG_DONE = os.path.join(STORE, "lang_done")
 CLEAN_URLS = os.path.join(STORE, "clean_urls")
+BLOCKS = os.path.join(STORE, "blocks")
 
 for p in (
     PROGRESS, URLS, PRESETS, META,
-    WORDS, RUNPOD_IDS, LANG_DONE, CLEAN_URLS
+    WORDS, RUNPOD_IDS, LANG_DONE, CLEAN_URLS, BLOCKS
 ):
     os.makedirs(p, exist_ok=True)
 
@@ -62,7 +63,7 @@ for p in (
 # APP
 # =========================
 
-app = FastAPI(title="ClipFile Backend", version="2.1")
+app = FastAPI(title="ClipFile Backend", version="2.2")
 
 app.add_middleware(
     CORSMiddleware,
@@ -86,7 +87,7 @@ class UploadURL(BaseModel):
 class TranslatorCallback(BaseModel):
     job_id: str
     language: str
-    words: list[dict]   # 🔴 VOLVEMOS A WORDS
+    blocks: list[dict]   # ⬅️ CAMBIO CLAVE (bloques 3 palabras)
 
 
 # =========================
@@ -256,13 +257,6 @@ def progress(job_id: str):
                 )
 
             write_progress(job_id, 80)
-        else:
-            write_progress(job_id, 60)
-
-    elif status == "FAILED":
-        write_progress(job_id, -1)
-    else:
-        write_progress(job_id, max(percent, 50))
 
     return {"percent": read_progress(job_id)}
 
@@ -271,9 +265,9 @@ def progress(job_id: str):
 def translator_callback(body: TranslatorCallback):
     job_id = body.job_id
     lang = body.language
-    words = body.words
+    blocks = body.blocks
 
-    json.dump(words, open(os.path.join(WORDS, f"{job_id}_{lang}.json"), "w"))
+    json.dump(blocks, open(os.path.join(BLOCKS, f"{job_id}_{lang}.json"), "w"))
 
     clean_base_video_url = open(os.path.join(CLEAN_URLS, f"{job_id}.txt")).read().strip()
 
@@ -287,7 +281,7 @@ def translator_callback(body: TranslatorCallback):
             "input": {
                 "job_id": job_id,
                 "language": lang,
-                "words": words,
+                "blocks": blocks,
                 "base_video_url": clean_base_video_url,
             }
         },
