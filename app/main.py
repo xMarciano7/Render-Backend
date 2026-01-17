@@ -5,6 +5,7 @@
 import os
 import uuid
 import json
+import time
 import requests
 import boto3
 
@@ -65,7 +66,7 @@ for p in (
 # APP
 # =========================
 
-app = FastAPI(title="ClipFile Backend", version="2.4")
+app = FastAPI(title="ClipFile Backend", version="2.4-fixed-r2wait")
 
 app.add_middleware(
     CORSMiddleware,
@@ -81,6 +82,7 @@ app.add_middleware(
 # =========================
 
 class UploadURL(BaseModel):
+    job_id: str | None = None
     video_url: str
     subtitle_preset_original: dict
     subtitle_preset_translated: dict
@@ -96,6 +98,25 @@ class TranslatorCallback(BaseModel):
 # =========================
 # HELPERS
 # =========================
+
+def extract_job_id_from_video_url(video_url: str) -> str | None:
+    try:
+        return video_url.split("/")[-1].replace(".mp4", "")
+    except:
+        return None
+
+
+def wait_for_video_available(url: str, retries: int = 5, delay: float = 1.5) -> bool:
+    for _ in range(retries):
+        try:
+            r = requests.head(url, timeout=5)
+            if r.status_code == 200:
+                return True
+        except:
+            pass
+        time.sleep(delay)
+    return False
+
 
 def write_progress(job_id: str, value: int):
     path = os.path.join(PROGRESS, f"{job_id}.txt")
@@ -181,7 +202,12 @@ def get_upload_url():
 
 @app.post("/upload")
 def upload(body: UploadURL):
-    job_id = str(uuid.uuid4())
+    job_id = (
+        body.job_id
+        or extract_job_id_from_video_url(body.video_url)
+        or str(uuid.uuid4())
+    )
+
     write_progress(job_id, 5)
 
     json.dump(
@@ -198,6 +224,11 @@ def upload(body: UploadURL):
     )
 
     open(os.path.join(CLEAN_URLS, f"{job_id}.txt"), "w").write(body.video_url)
+
+    # 🔒 NUEVO: esperar a que el MP4 sea accesible en R2
+    if not wait_for_video_available(body.video_url):
+        write_progress(job_id, -1)
+        raise HTTPException(500, "Video not available in storage yet")
 
     r = requests.post(
         f"https://api.runpod.ai/v2/{RUNPOD_WORKER_ENDPOINT_ID}/run",
@@ -224,6 +255,8 @@ def upload(body: UploadURL):
 
     return {"job_id": job_id}
 
+
+# ===== RESTO DEL ARCHIVO: SIN CAMBIOS =====
 
 @app.get("/progress/{job_id}")
 def progress(job_id: str):
