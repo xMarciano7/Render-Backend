@@ -50,11 +50,10 @@ WORDS = os.path.join(STORE, "words")
 RUNPOD_IDS = os.path.join(STORE, "runpod_ids")
 LANG_DONE = os.path.join(STORE, "lang_done")
 CLEAN_URLS = os.path.join(STORE, "clean_urls")
-TRANSLATED_TEXTS = os.path.join(STORE, "translated_texts")  # <-- AÑADIDO
 
 for p in (
-    PROGRESS, URLS, PRESETS, META, WORDS,
-    RUNPOD_IDS, LANG_DONE, CLEAN_URLS, TRANSLATED_TEXTS
+    PROGRESS, URLS, PRESETS, META,
+    WORDS, RUNPOD_IDS, LANG_DONE, CLEAN_URLS
 ):
     os.makedirs(p, exist_ok=True)
 
@@ -63,7 +62,7 @@ for p in (
 # APP
 # =========================
 
-app = FastAPI(title="ClipFile Backend", version="2.0")
+app = FastAPI(title="ClipFile Backend", version="2.1")
 
 app.add_middleware(
     CORSMiddleware,
@@ -87,7 +86,7 @@ class UploadURL(BaseModel):
 class TranslatorCallback(BaseModel):
     job_id: str
     language: str
-    text: str   # <-- AÑADIDO (texto plano traducido)
+    words: list[dict]   # 🔴 VOLVEMOS A WORDS
 
 
 # =========================
@@ -236,7 +235,6 @@ def progress(job_id: str):
             open(os.path.join(URLS, f"{job_id}_orig.txt"), "w").write(base_url)
             json.dump(words, open(os.path.join(WORDS, f"{job_id}_orig.json"), "w"))
 
-            texts = [" ".join(w["word"] for w in words)]
             langs = json.load(open(os.path.join(META, f"{job_id}.json"))).get("languages", [])
 
             for lang in langs:
@@ -251,7 +249,7 @@ def progress(job_id: str):
                             "job_id": job_id,
                             "source_language": "spa_Latn",
                             "target_language": lang,
-                            "texts": texts,
+                            "words": words,
                             "callback": "https://render-backend-1-xa46.onrender.com/translator-callback",
                         }
                     },
@@ -273,9 +271,9 @@ def progress(job_id: str):
 def translator_callback(body: TranslatorCallback):
     job_id = body.job_id
     lang = body.language
-    text = body.text
+    words = body.words
 
-    open(os.path.join(TRANSLATED_TEXTS, f"{job_id}_{lang}.txt"), "w").write(text)
+    json.dump(words, open(os.path.join(WORDS, f"{job_id}_{lang}.json"), "w"))
 
     clean_base_video_url = open(os.path.join(CLEAN_URLS, f"{job_id}.txt")).read().strip()
 
@@ -289,8 +287,8 @@ def translator_callback(body: TranslatorCallback):
             "input": {
                 "job_id": job_id,
                 "language": lang,
+                "words": words,
                 "base_video_url": clean_base_video_url,
-                "translated_text": text,
             }
         },
     )
