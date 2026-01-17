@@ -65,7 +65,7 @@ for p in (
 # APP
 # =========================
 
-app = FastAPI(title="ClipFile Backend", version="2.5")
+app = FastAPI(title="ClipFile Backend", version="2.6")
 
 app.add_middleware(
     CORSMiddleware,
@@ -156,6 +156,29 @@ def r2_client():
 # ROUTES
 # =========================
 
+@app.post("/upload-url")
+def upload_url():
+    job_id = str(uuid.uuid4())
+    key = f"uploads/{job_id}.mp4"
+
+    s3 = r2_client()
+    signed = s3.generate_presigned_url(
+        ClientMethod="put_object",
+        Params={
+            "Bucket": R2_BUCKET,
+            "Key": key,
+            "ContentType": "video/mp4",
+        },
+        ExpiresIn=3600,
+    )
+
+    return {
+        "job_id": job_id,
+        "upload_url": signed,
+        "video_url": f"{R2_PUBLIC_BASE}/{key}",
+    }
+
+
 @app.post("/upload")
 def upload(body: UploadURL):
     job_id = str(uuid.uuid4())
@@ -208,9 +231,9 @@ def progress(job_id: str):
     if percent in (100, -1):
         return {"percent": percent}
 
-    # ===== ORIGINAL =====
+    # ORIGINAL
     orig_id_path = os.path.join(RUNPOD_IDS, f"{job_id}_orig.txt")
-    if os.path.exists(orig_id_path):
+    if os.path.exists(orig_id_path) and not has_flag(job_id, "orig_done"):
         runpod_id = open(orig_id_path).read().strip()
         r = requests.get(
             f"https://api.runpod.ai/v2/{RUNPOD_WORKER_ENDPOINT_ID}/status/{runpod_id}",
@@ -218,7 +241,7 @@ def progress(job_id: str):
             timeout=10,
         )
 
-        if r.status_code == 200 and r.json().get("status") == "COMPLETED" and not has_flag(job_id, "orig_done"):
+        if r.status_code == 200 and r.json().get("status") == "COMPLETED":
             out = r.json().get("output", {})
             if out.get("base_url") and out.get("words"):
                 open(os.path.join(URLS, f"{job_id}_orig.txt"), "w").write(out["base_url"])
@@ -246,7 +269,7 @@ def progress(job_id: str):
                 set_flag(job_id, "orig_done")
                 write_progress(job_id, 80)
 
-    # ===== TRANSLATED =====
+    # TRANSLATED
     langs = json.load(open(os.path.join(META, f"{job_id}.json"))).get("languages", [])
     for lang in langs:
         pid = os.path.join(RUNPOD_IDS, f"{job_id}_{lang}.txt")
