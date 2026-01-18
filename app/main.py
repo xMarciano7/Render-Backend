@@ -65,11 +65,13 @@ for p in (
 # APP
 # =========================
 
-app = FastAPI(title="ClipFile Backend", version="2.4-stable+orig100")
+app = FastAPI(title="ClipFile Backend", version="2.4-stable+orig100+corsfix")
 
+# 🔴 FIX CORS REAL PARA WIX
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
+    allow_origin_regex=r"https://.*\.wixsite\.com|https://.*\.wix\.com",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -271,7 +273,6 @@ def progress(job_id: str):
 
             langs = json.load(open(os.path.join(META, f"{job_id}.json"))).get("languages", [])
 
-            # 🔴 FIX CLAVE: si NO hay idiomas, cerrar a 100% aquí
             if not langs:
                 write_progress(job_id, 100)
                 return {"percent": 100}
