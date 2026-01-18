@@ -8,7 +8,7 @@ import json
 import requests
 import boto3
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response
 from fastapi.responses import RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -65,17 +65,29 @@ for p in (
 # APP
 # =========================
 
-app = FastAPI(title="ClipFile Backend", version="2.4-stable+orig100+corsfix")
+app = FastAPI(title="ClipFile Backend", version="2.5-cors-final")
 
-# 🔴 FIX CORS REAL PARA WIX
+# ✅ CORS CORRECTO (NO headers manuales)
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=r"https://.*\.wix(site)?\.com",
+    allow_origins=["*"],
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+
+# =========================
+# OPTIONS (PRE-FLIGHT)
+# =========================
+
+@app.options("/upload-url")
+def options_upload_url():
+    return Response(status_code=204)
+
+@app.options("/upload")
+def options_upload():
+    return Response(status_code=204)
 
 
 # =========================
@@ -167,7 +179,7 @@ def r2_client():
 # =========================
 
 @app.post("/upload-url")
-def get_upload_url():
+def upload_url():
     job_id = str(uuid.uuid4())
     key = f"uploads/{job_id}.mp4"
 
