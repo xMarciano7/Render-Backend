@@ -65,7 +65,7 @@ for p in (
 # APP
 # =========================
 
-app = FastAPI(title="ClipFile Backend", version="2.4-stable")
+app = FastAPI(title="ClipFile Backend", version="2.4-stable+orig100")
 
 app.add_middleware(
     CORSMiddleware,
@@ -210,7 +210,7 @@ def upload(body: UploadURL):
         open(os.path.join(META, f"{job_id}.json"), "w")
     )
 
-    open(os.path.join(CLEAN_URLS, f"{job_id}.txt"), "w").write(body.video_url)
+    open(os.path.join(CLEAN_URLS, f"{job_id}.txt")).write(body.video_url)
 
     r = requests.post(
         f"https://api.runpod.ai/v2/{RUNPOD_WORKER_ENDPOINT_ID}/run",
@@ -270,6 +270,12 @@ def progress(job_id: str):
             json.dump(words, open(os.path.join(WORDS, f"{job_id}_orig.json"), "w"))
 
             langs = json.load(open(os.path.join(META, f"{job_id}.json"))).get("languages", [])
+
+            # 🔴 FIX CLAVE: si NO hay idiomas, cerrar a 100% aquí
+            if not langs:
+                write_progress(job_id, 100)
+                return {"percent": 100}
+
             for lang in langs:
                 requests.post(
                     f"https://api.runpod.ai/v2/{RUNPOD_TRANSLATOR_ENDPOINT_ID}/run",
