@@ -65,29 +65,24 @@ for p in (
 # APP
 # =========================
 
-app = FastAPI(title="ClipFile Backend", version="2.5-cors-final")
+app = FastAPI(title="ClipFile Backend", version="2.6-cors-fixed")
 
-# ✅ CORS CORRECTO (NO headers manuales)
+# ✅ CORS DEFINITIVO PARA WIX
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=r"https://.*\.(wixsite|wix|wix-vibe)\.com",
+    allow_origin_regex=r"https://.*\.(wixsite\.com|wixstudio\.com|wix\.com|editorx\.com|wix-vibe\.com)$",
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
-
 # =========================
 # OPTIONS (PRE-FLIGHT)
 # =========================
 
-@app.options("/upload-url")
-def options_upload_url():
-    return Response(status_code=204)
-
-@app.options("/upload")
-def options_upload():
+@app.options("/{path:path}")
+def options_all(path: str):
     return Response(status_code=204)
 
 
