@@ -70,12 +70,12 @@ app = FastAPI(title="ClipFile Backend", version="2.4-stable+orig100+corsfix")
 # 🔴 FIX CORS REAL PARA WIX
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_origin_regex=r"https://.*\.wixsite\.com|https://.*\.wix\.com",
-    allow_credentials=True,
+    allow_origin_regex=r"https://.*\.wix(site)?\.com",
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 
 
 # =========================
