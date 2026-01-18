@@ -5,7 +5,6 @@
 import os
 import uuid
 import json
-import time
 import requests
 import boto3
 
@@ -66,7 +65,7 @@ for p in (
 # APP
 # =========================
 
-app = FastAPI(title="ClipFile Backend", version="2.4-fixed-r2wait")
+app = FastAPI(title="ClipFile Backend", version="2.4-stable")
 
 app.add_middleware(
     CORSMiddleware,
@@ -104,18 +103,6 @@ def extract_job_id_from_video_url(video_url: str) -> str | None:
         return video_url.split("/")[-1].replace(".mp4", "")
     except:
         return None
-
-
-def wait_for_video_available(url: str, retries: int = 5, delay: float = 1.5) -> bool:
-    for _ in range(retries):
-        try:
-            r = requests.head(url, timeout=5)
-            if r.status_code == 200:
-                return True
-        except:
-            pass
-        time.sleep(delay)
-    return False
 
 
 def write_progress(job_id: str, value: int):
@@ -225,11 +212,6 @@ def upload(body: UploadURL):
 
     open(os.path.join(CLEAN_URLS, f"{job_id}.txt"), "w").write(body.video_url)
 
-    # 🔒 NUEVO: esperar a que el MP4 sea accesible en R2
-    if not wait_for_video_available(body.video_url):
-        write_progress(job_id, -1)
-        raise HTTPException(500, "Video not available in storage yet")
-
     r = requests.post(
         f"https://api.runpod.ai/v2/{RUNPOD_WORKER_ENDPOINT_ID}/run",
         headers={
@@ -255,8 +237,6 @@ def upload(body: UploadURL):
 
     return {"job_id": job_id}
 
-
-# ===== RESTO DEL ARCHIVO: SIN CAMBIOS =====
 
 @app.get("/progress/{job_id}")
 def progress(job_id: str):
