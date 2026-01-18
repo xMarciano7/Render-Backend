@@ -36,11 +36,12 @@ if not R2_BUCKET or not R2_ACCOUNT_ID or not R2_ACCESS_KEY or not R2_SECRET_KEY 
 
 
 # =========================
-# STORAGE
+# STORAGE (ROBUSTO)
 # =========================
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 STORE = os.path.join(BASE, "storage")
+os.makedirs(STORE, exist_ok=True)
 
 PROGRESS = os.path.join(STORE, "progress")
 URLS = os.path.join(STORE, "urls")
@@ -65,9 +66,8 @@ for p in (
 # APP
 # =========================
 
-app = FastAPI(title="ClipFile Backend", version="2.6-cors-fixed")
+app = FastAPI(title="ClipFile Backend", version="2.7-stable")
 
-# ✅ CORS DEFINITIVO PARA WIX
 app.add_middleware(
     CORSMiddleware,
     allow_origin_regex=r"https://.*\.(wixsite\.com|wixstudio\.com|wix\.com|editorx\.com|wix-vibe\.com)$",
@@ -78,7 +78,7 @@ app.add_middleware(
 
 
 # =========================
-# OPTIONS (PRE-FLIGHT)
+# OPTIONS
 # =========================
 
 @app.options("/{path:path}")
@@ -199,11 +199,7 @@ def upload_url():
 
 @app.post("/upload")
 def upload(body: UploadURL):
-    job_id = (
-        body.job_id
-        or extract_job_id_from_video_url(body.video_url)
-        or str(uuid.uuid4())
-    )
+    job_id = body.job_id or extract_job_id_from_video_url(body.video_url) or str(uuid.uuid4())
 
     write_progress(job_id, 5)
 
@@ -220,7 +216,7 @@ def upload(body: UploadURL):
         open(os.path.join(META, f"{job_id}.json"), "w")
     )
 
-    open(os.path.join(CLEAN_URLS, f"{job_id}.txt")).write(body.video_url)
+    open(os.path.join(CLEAN_URLS, f"{job_id}.txt"), "w").write(body.video_url)
 
     r = requests.post(
         f"https://api.runpod.ai/v2/{RUNPOD_WORKER_ENDPOINT_ID}/run",
@@ -318,9 +314,7 @@ def translator_callback(body: TranslatorCallback):
     json.dump(blocks, open(os.path.join(BLOCKS, f"{job_id}_{lang}.json"), "w"))
 
     clean_video_url = open(os.path.join(CLEAN_URLS, f"{job_id}.txt")).read().strip()
-    preset_translated = json.load(
-        open(os.path.join(PRESETS, f"{job_id}.json"))
-    )["translated"]
+    preset_translated = json.load(open(os.path.join(PRESETS, f"{job_id}.json")))["translated"]
 
     r = requests.post(
         f"https://api.runpod.ai/v2/{RUNPOD_WORKER_ENDPOINT_ID}/run",
