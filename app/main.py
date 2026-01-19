@@ -66,7 +66,7 @@ for p in (
 # APP
 # =========================
 
-app = FastAPI(title="ClipFile Backend", version="2.7-stable")
+app = FastAPI(title="ClipFile Backend", version="2.8-fixed")
 
 app.add_middleware(
     CORSMiddleware,
@@ -141,25 +141,6 @@ def has_flag(job_id: str, name: str) -> bool:
     return os.path.exists(os.path.join(FLAGS, f"{job_id}_{name}.flag"))
 
 
-def mark_lang_done(job_id: str, lang: str):
-    path = os.path.join(LANG_DONE, f"{job_id}.json")
-    done = json.load(open(path)) if os.path.exists(path) else []
-    if lang not in done:
-        done.append(lang)
-    json.dump(done, open(path, "w"))
-
-
-def all_langs_done(job_id: str) -> bool:
-    langs = json.load(open(os.path.join(META, f"{job_id}.json"))).get("languages", [])
-    if not langs:
-        return True
-    path = os.path.join(LANG_DONE, f"{job_id}.json")
-    if not os.path.exists(path):
-        return False
-    done = json.load(open(path))
-    return set(done) == set(langs)
-
-
 def r2_client():
     return boto3.client(
         "s3",
@@ -168,6 +149,45 @@ def r2_client():
         aws_secret_access_key=R2_SECRET_KEY,
         region_name="auto"
     )
+
+
+def all_clips_ready(job_id: str) -> bool:
+    langs = json.load(open(os.path.join(META, f"{job_id}.json"))).get("languages", [])
+    if not os.path.exists(os.path.join(URLS, f"{job_id}_orig.txt")):
+        return False
+    for lang in langs:
+        if not os.path.exists(os.path.join(URLS, f"{job_id}_{lang}.txt")):
+            return False
+    return True
+
+
+def check_worker_and_store(job_id: str, suffix: str):
+    id_path = os.path.join(RUNPOD_IDS, f"{job_id}_{suffix}.txt")
+    if not os.path.exists(id_path):
+        return False
+
+    runpod_id = open(id_path).read().strip()
+
+    r = requests.get(
+        f"https://api.runpod.ai/v2/{RUNPOD_WORKER_ENDPOINT_ID}/status/{runpod_id}",
+        headers={"Authorization": f"Bearer {RUNPOD_API_KEY}"},
+        timeout=10,
+    )
+
+    if r.status_code != 200:
+        return False
+
+    data = r.json()
+    if data.get("status") != "COMPLETED":
+        return False
+
+    out = data.get("output", {})
+    base_url = out.get("base_url")
+    if not base_url:
+        return False
+
+    open(os.path.join(URLS, f"{job_id}_{suffix}.txt"), "w").write(base_url)
+    return True
 
 
 # =========================
@@ -250,57 +270,22 @@ def progress(job_id: str):
     if percent in (100, -1):
         return {"percent": percent}
 
-    orig_id_path = os.path.join(RUNPOD_IDS, f"{job_id}_orig.txt")
-    if not os.path.exists(orig_id_path):
-        return {"percent": percent}
+    # ORIGINAL
+    if check_worker_and_store(job_id, "orig"):
+        langs = json.load(open(os.path.join(META, f"{job_id}.json"))).get("languages", [])
+        if not langs and all_clips_ready(job_id):
+            write_progress(job_id, 100)
+            return {"percent": 100}
+        write_progress(job_id, 60)
 
-    runpod_id = open(orig_id_path).read().strip()
+    # TRANSLATED
+    langs = json.load(open(os.path.join(META, f"{job_id}.json"))).get("languages", [])
+    for lang in langs:
+        check_worker_and_store(job_id, lang)
 
-    r = requests.get(
-        f"https://api.runpod.ai/v2/{RUNPOD_WORKER_ENDPOINT_ID}/status/{runpod_id}",
-        headers={"Authorization": f"Bearer {RUNPOD_API_KEY}"},
-        timeout=10,
-    )
-
-    if r.status_code != 200:
-        return {"percent": percent}
-
-    data = r.json()
-    if data.get("status") == "COMPLETED" and not has_flag(job_id, "translator_started"):
-        out = data.get("output", {})
-        base_url = out.get("base_url")
-        words = out.get("words")
-
-        if base_url and words:
-            open(os.path.join(URLS, f"{job_id}_orig.txt"), "w").write(base_url)
-            json.dump(words, open(os.path.join(WORDS, f"{job_id}_orig.json"), "w"))
-
-            langs = json.load(open(os.path.join(META, f"{job_id}.json"))).get("languages", [])
-
-            if not langs:
-                write_progress(job_id, 100)
-                return {"percent": 100}
-
-            for lang in langs:
-                requests.post(
-                    f"https://api.runpod.ai/v2/{RUNPOD_TRANSLATOR_ENDPOINT_ID}/run",
-                    headers={
-                        "Authorization": f"Bearer {RUNPOD_API_KEY}",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "input": {
-                            "job_id": job_id,
-                            "source_language": "spa_Latn",
-                            "target_language": lang,
-                            "words": words,
-                            "callback": "https://render-backend-1-xa46.onrender.com/translator-callback",
-                        }
-                    },
-                )
-
-            set_flag(job_id, "translator_started")
-            write_progress(job_id, 80)
+    if all_clips_ready(job_id):
+        write_progress(job_id, 100)
+        return {"percent": 100}
 
     return {"percent": read_progress(job_id)}
 
@@ -337,11 +322,6 @@ def translator_callback(body: TranslatorCallback):
         raise HTTPException(500, r.text)
 
     open(os.path.join(RUNPOD_IDS, f"{job_id}_{lang}.txt"), "w").write(r.json()["id"])
-    mark_lang_done(job_id, lang)
-
-    if all_langs_done(job_id):
-        write_progress(job_id, 100)
-
     return {"ok": True}
 
 
