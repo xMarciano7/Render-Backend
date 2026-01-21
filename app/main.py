@@ -36,7 +36,7 @@ if not R2_BUCKET or not R2_ACCOUNT_ID or not R2_ACCESS_KEY or not R2_SECRET_KEY 
 
 
 # =========================
-# STORAGE (ROBUSTO)
+# STORAGE
 # =========================
 
 BASE = os.path.dirname(os.path.abspath(__file__))
@@ -131,14 +131,6 @@ def read_progress(job_id: str) -> int:
         return int(open(os.path.join(PROGRESS, f"{job_id}.txt")).read())
     except:
         return -1
-
-
-def set_flag(job_id: str, name: str):
-    open(os.path.join(FLAGS, f"{job_id}_{name}.flag"), "w").write("1")
-
-
-def has_flag(job_id: str, name: str) -> bool:
-    return os.path.exists(os.path.join(FLAGS, f"{job_id}_{name}.flag"))
 
 
 def r2_client():
@@ -249,6 +241,7 @@ def upload(body: UploadURL):
                 "job_id": job_id,
                 "video_url": body.video_url,
                 "subtitle_preset": body.subtitle_preset_original,
+                "video_layout": body.subtitle_preset_original.get("video_layout"),
             }
         },
         timeout=20,
@@ -270,7 +263,6 @@ def progress(job_id: str):
     if percent in (100, -1):
         return {"percent": percent}
 
-    # ORIGINAL
     if check_worker_and_store(job_id, "orig"):
         langs = json.load(open(os.path.join(META, f"{job_id}.json"))).get("languages", [])
         if not langs and all_clips_ready(job_id):
@@ -278,7 +270,6 @@ def progress(job_id: str):
             return {"percent": 100}
         write_progress(job_id, 60)
 
-    # TRANSLATED
     langs = json.load(open(os.path.join(META, f"{job_id}.json"))).get("languages", [])
     for lang in langs:
         check_worker_and_store(job_id, lang)
@@ -314,6 +305,7 @@ def translator_callback(body: TranslatorCallback):
                 "blocks": blocks,
                 "base_video_url": clean_video_url,
                 "subtitle_preset": preset_translated,
+                "video_layout": preset_translated.get("video_layout"),
             }
         },
     )
