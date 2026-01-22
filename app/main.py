@@ -66,7 +66,7 @@ for p in (
 # APP
 # =========================
 
-app = FastAPI(title="ClipFile Backend", version="2.9-fixed")
+app = FastAPI(title="ClipFile Backend", version="3.0-fixed")
 
 app.add_middleware(
     CORSMiddleware,
@@ -214,7 +214,6 @@ def upload(body: UploadURL):
     job_id = body.job_id or extract_job_id_from_video_url(body.video_url) or str(uuid.uuid4())
     write_progress(job_id, 5)
 
-    # 🔧 MERGE FRONTEND FIELDS CORRECTLY
     preset_orig = dict(body.subtitle_preset_original or {})
     preset_trans = dict(body.subtitle_preset_translated or {})
 
@@ -245,6 +244,8 @@ def upload(body: UploadURL):
                 "video_url": body.video_url,
                 "subtitle_preset": preset_orig,
                 "video_layout": preset_orig.get("videoLayout"),
+                "background_opacity": preset_orig.get("backgroundOpacity"),
+                "background_color": preset_orig.get("backgroundColor"),
             }
         },
         timeout=20,
@@ -309,6 +310,8 @@ def translator_callback(body: TranslatorCallback):
                 "base_video_url": clean_video_url,
                 "subtitle_preset": preset_translated,
                 "video_layout": preset_translated.get("videoLayout"),
+                "background_opacity": preset_translated.get("backgroundOpacity"),
+                "background_color": preset_translated.get("backgroundColor"),
             }
         },
     )
