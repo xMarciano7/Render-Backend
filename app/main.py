@@ -66,7 +66,7 @@ for p in (
 # APP
 # =========================
 
-app = FastAPI(title="ClipFile Backend", version="2.8-fixed")
+app = FastAPI(title="ClipFile Backend", version="2.9-fixed")
 
 app.add_middleware(
     CORSMiddleware,
@@ -212,13 +212,16 @@ def upload_url():
 @app.post("/upload")
 def upload(body: UploadURL):
     job_id = body.job_id or extract_job_id_from_video_url(body.video_url) or str(uuid.uuid4())
-
     write_progress(job_id, 5)
+
+    # 🔧 MERGE FRONTEND FIELDS CORRECTLY
+    preset_orig = dict(body.subtitle_preset_original or {})
+    preset_trans = dict(body.subtitle_preset_translated or {})
 
     json.dump(
         {
-            "original": body.subtitle_preset_original,
-            "translated": body.subtitle_preset_translated,
+            "original": preset_orig,
+            "translated": preset_trans,
         },
         open(os.path.join(PRESETS, f"{job_id}.json"), "w")
     )
@@ -240,8 +243,8 @@ def upload(body: UploadURL):
             "input": {
                 "job_id": job_id,
                 "video_url": body.video_url,
-                "subtitle_preset": body.subtitle_preset_original,
-                "video_layout": body.subtitle_preset_original.get("video_layout"),
+                "subtitle_preset": preset_orig,
+                "video_layout": preset_orig.get("videoLayout"),
             }
         },
         timeout=20,
@@ -305,7 +308,7 @@ def translator_callback(body: TranslatorCallback):
                 "blocks": blocks,
                 "base_video_url": clean_video_url,
                 "subtitle_preset": preset_translated,
-                "video_layout": preset_translated.get("video_layout"),
+                "video_layout": preset_translated.get("videoLayout"),
             }
         },
     )
