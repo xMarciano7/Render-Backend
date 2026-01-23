@@ -9,7 +9,7 @@ import requests
 import boto3
 
 from fastapi import FastAPI, HTTPException, Response
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -66,7 +66,7 @@ for p in (
 # APP
 # =========================
 
-app = FastAPI(title="ClipFile Backend", version="3.0-fixed")
+app = FastAPI(title="ClipFile Backend", version="3.1-preview-download-split")
 
 app.add_middleware(
     CORSMiddleware,
@@ -321,7 +321,23 @@ def translator_callback(body: TranslatorCallback):
 
 
 # =========================
-# FIXED DOWNLOAD (STREAM MP4)
+# PREVIEW (PUBLIC R2 URL)
+# =========================
+
+@app.get("/preview/{job_id}")
+@app.get("/preview/{job_id}/{lang}")
+def preview(job_id: str, lang: str | None = None):
+    suffix = lang or "orig"
+    path = os.path.join(URLS, f"{job_id}_{suffix}.txt")
+    if not os.path.exists(path):
+        raise HTTPException(404, "Not ready")
+
+    r2_url = open(path).read().strip()
+    return RedirectResponse(url=r2_url, status_code=302)
+
+
+# =========================
+# DOWNLOAD (ATTACHMENT)
 # =========================
 
 @app.get("/download/{job_id}")
@@ -333,7 +349,6 @@ def download(job_id: str, lang: str | None = None):
         raise HTTPException(404, "Not ready")
 
     r2_url = open(path).read().strip()
-
     r = requests.get(r2_url, stream=True)
     if r.status_code != 200:
         raise HTTPException(502, "Failed to fetch video")
