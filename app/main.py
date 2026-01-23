@@ -9,7 +9,7 @@ import requests
 import boto3
 
 from fastapi import FastAPI, HTTPException, Response
-from fastapi.responses import RedirectResponse
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -218,10 +218,7 @@ def upload(body: UploadURL):
     preset_trans = dict(body.subtitle_preset_translated or {})
 
     json.dump(
-        {
-            "original": preset_orig,
-            "translated": preset_trans,
-        },
+        {"original": preset_orig, "translated": preset_trans},
         open(os.path.join(PRESETS, f"{job_id}.json"), "w")
     )
 
@@ -323,10 +320,30 @@ def translator_callback(body: TranslatorCallback):
     return {"ok": True}
 
 
+# =========================
+# FIXED DOWNLOAD (STREAM MP4)
+# =========================
+
 @app.get("/download/{job_id}")
+@app.get("/download/{job_id}/{lang}")
 def download(job_id: str, lang: str | None = None):
     suffix = lang or "orig"
     path = os.path.join(URLS, f"{job_id}_{suffix}.txt")
     if not os.path.exists(path):
         raise HTTPException(404, "Not ready")
-    return RedirectResponse(open(path).read().strip())
+
+    r2_url = open(path).read().strip()
+
+    r = requests.get(r2_url, stream=True)
+    if r.status_code != 200:
+        raise HTTPException(502, "Failed to fetch video")
+
+    filename = f"{job_id}_{suffix}.mp4"
+
+    return StreamingResponse(
+        r.iter_content(chunk_size=1024 * 1024),
+        media_type="video/mp4",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"'
+        }
+    )
