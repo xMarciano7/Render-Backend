@@ -66,7 +66,7 @@ for p in (PROGRESS, URLS, PRESETS, META, WORDS, BLOCKS, RUNPOD_IDS, FLAGS, CLEAN
 # APP
 # =========================
 
-app = FastAPI(title="ClipFile Backend", version="4.1-final-orchestrated")
+app = FastAPI(title="ClipFile Backend", version="4.2-fixed")
 
 app.add_middleware(
     CORSMiddleware,
@@ -213,17 +213,45 @@ def upload(body: UploadURL):
 # =========================
 
 @app.post("/worker-callback")
-def worker_callback(
-    body: WorkerCallback,
-    lang: str | None = Query(default=None)
-):
+def worker_callback(body: WorkerCallback, lang: str | None = Query(default=None)):
     job_id = body.job_id
-
     suffix = lang or "orig"
+
     open(os.path.join(URLS, f"{job_id}_{suffix}.txt"), "w").write(body.base_url)
 
-    if body.words and suffix == "orig":
+    if suffix == "orig" and body.words:
         open(os.path.join(WORDS, f"{job_id}.json"), "w").write(json.dumps(body.words))
+
+        langs = json.load(open(os.path.join(META, f"{job_id}.json"))).get("languages", [])
+        if not langs:
+            write_progress(job_id, 100)
+            return {"status": "ok"}
+
+        write_progress(job_id, 60)
+
+        for l in langs:
+            flag = os.path.join(FLAGS, f"{job_id}_translator_{l}.txt")
+            if os.path.exists(flag):
+                continue
+
+            requests.post(
+                f"https://api.runpod.ai/v2/{RUNPOD_TRANSLATOR_ENDPOINT_ID}/run",
+                headers={"Authorization": f"Bearer {RUNPOD_API_KEY}"},
+                json={
+                    "input": {
+                        "job_id": job_id,
+                        "source_language": "eng_Latn",
+                        "target_language": l,
+                        "words": body.words,
+                        "callback": f"{BASE_URL}/translator-callback",
+                    }
+                },
+            )
+
+            open(flag, "w").write("1")
+
+        write_progress(job_id, 80)
+        return {"status": "ok"}
 
     if suffix != "orig" and all_translated_ready(job_id):
         write_progress(job_id, 100)
