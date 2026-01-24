@@ -70,7 +70,7 @@ app = FastAPI(title="ClipFile Backend", version="3.1-preview-download-split")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=r"https://.*\.(wixsite\.com|wixstudio\.com|wix\.com|editorx\.com|wix-vibe\.com)$",
+    allow_origin_regex=r".*",
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -194,11 +194,7 @@ def upload_url():
     s3 = r2_client()
     upload_url = s3.generate_presigned_url(
         ClientMethod="put_object",
-        Params={
-            "Bucket": R2_BUCKET,
-            "Key": key,
-            "ContentType": "video/mp4",
-        },
+        Params={"Bucket": R2_BUCKET, "Key": key, "ContentType": "video/mp4"},
         ExpiresIn=3600,
     )
 
@@ -214,11 +210,8 @@ def upload(body: UploadURL):
     job_id = body.job_id or extract_job_id_from_video_url(body.video_url) or str(uuid.uuid4())
     write_progress(job_id, 5)
 
-    preset_orig = dict(body.subtitle_preset_original or {})
-    preset_trans = dict(body.subtitle_preset_translated or {})
-
     json.dump(
-        {"original": preset_orig, "translated": preset_trans},
+        {"original": body.subtitle_preset_original, "translated": body.subtitle_preset_translated},
         open(os.path.join(PRESETS, f"{job_id}.json"), "w")
     )
 
@@ -231,21 +224,17 @@ def upload(body: UploadURL):
 
     r = requests.post(
         f"https://api.runpod.ai/v2/{RUNPOD_WORKER_ENDPOINT_ID}/run",
-        headers={
-            "Authorization": f"Bearer {RUNPOD_API_KEY}",
-            "Content-Type": "application/json",
-        },
+        headers={"Authorization": f"Bearer {RUNPOD_API_KEY}"},
         json={
             "input": {
                 "job_id": job_id,
                 "video_url": body.video_url,
-                "subtitle_preset": preset_orig,
-                "video_layout": preset_orig.get("videoLayout"),
-                "background_opacity": preset_orig.get("backgroundOpacity"),
-                "background_color": preset_orig.get("backgroundColor"),
+                "subtitle_preset": body.subtitle_preset_original,
+                "video_layout": body.subtitle_preset_original.get("videoLayout"),
+                "background_opacity": body.subtitle_preset_original.get("backgroundOpacity"),
+                "background_color": body.subtitle_preset_original.get("backgroundColor"),
             }
         },
-        timeout=20,
     )
 
     if r.status_code != 200:
@@ -261,14 +250,8 @@ def upload(body: UploadURL):
 @app.get("/progress/{job_id}")
 def progress(job_id: str):
     percent = read_progress(job_id)
-    if percent in (100, -1):
-        return {"percent": percent}
 
     if check_worker_and_store(job_id, "orig"):
-        langs = json.load(open(os.path.join(META, f"{job_id}.json"))).get("languages", [])
-        if not langs and all_clips_ready(job_id):
-            write_progress(job_id, 100)
-            return {"percent": 100}
         write_progress(job_id, 60)
 
     langs = json.load(open(os.path.join(META, f"{job_id}.json"))).get("languages", [])
@@ -282,50 +265,14 @@ def progress(job_id: str):
     return {"percent": read_progress(job_id)}
 
 
-@app.post("/translator-callback")
-def translator_callback(body: TranslatorCallback):
-    job_id = body.job_id
-    lang = body.language
-    blocks = body.blocks
-
-    json.dump(blocks, open(os.path.join(BLOCKS, f"{job_id}_{lang}.json"), "w"))
-
-    clean_video_url = open(os.path.join(CLEAN_URLS, f"{job_id}.txt")).read().strip()
-    preset_translated = json.load(open(os.path.join(PRESETS, f"{job_id}.json")))["translated"]
-
-    r = requests.post(
-        f"https://api.runpod.ai/v2/{RUNPOD_WORKER_ENDPOINT_ID}/run",
-        headers={
-            "Authorization": f"Bearer {RUNPOD_API_KEY}",
-            "Content-Type": "application/json",
-        },
-        json={
-            "input": {
-                "job_id": job_id,
-                "language": lang,
-                "blocks": blocks,
-                "base_video_url": clean_video_url,
-                "subtitle_preset": preset_translated,
-                "video_layout": preset_translated.get("videoLayout"),
-                "background_opacity": preset_translated.get("backgroundOpacity"),
-                "background_color": preset_translated.get("backgroundColor"),
-            }
-        },
-    )
-
-    if r.status_code != 200:
-        raise HTTPException(500, r.text)
-
-    open(os.path.join(RUNPOD_IDS, f"{job_id}_{lang}.txt"), "w").write(r.json()["id"])
-    return {"ok": True}
-
-
 # =========================
-# PREVIEW (PUBLIC R2 URL)
+# PREVIEW (FIXED: GET + HEAD)
 # =========================
 
 @app.get("/preview/{job_id}")
 @app.get("/preview/{job_id}/{lang}")
+@app.head("/preview/{job_id}")
+@app.head("/preview/{job_id}/{lang}")
 def preview(job_id: str, lang: str | None = None):
     suffix = lang or "orig"
     path = os.path.join(URLS, f"{job_id}_{suffix}.txt")
@@ -337,7 +284,7 @@ def preview(job_id: str, lang: str | None = None):
 
 
 # =========================
-# DOWNLOAD (ATTACHMENT)
+# DOWNLOAD
 # =========================
 
 @app.get("/download/{job_id}")
@@ -353,12 +300,8 @@ def download(job_id: str, lang: str | None = None):
     if r.status_code != 200:
         raise HTTPException(502, "Failed to fetch video")
 
-    filename = f"{job_id}_{suffix}.mp4"
-
     return StreamingResponse(
         r.iter_content(chunk_size=1024 * 1024),
         media_type="video/mp4",
-        headers={
-            "Content-Disposition": f'attachment; filename="{filename}"'
-        }
+        headers={"Content-Disposition": f'attachment; filename="{job_id}_{suffix}.mp4"'}
     )
