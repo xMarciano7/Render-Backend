@@ -70,7 +70,7 @@ app = FastAPI(title="ClipFile Backend", version="3.1-preview-download-split")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=r".*",
+    allow_origins=["*"],
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
