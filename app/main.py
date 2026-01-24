@@ -170,7 +170,14 @@ def check_worker_and_store(job_id: str, suffix: str):
         return False
 
     data = r.json()
-    if data.get("status") != "COMPLETED":
+    status = data.get("status")
+
+    # progreso intermedio real (job arrancado y en ejecución)
+    if status in ("IN_QUEUE", "IN_PROGRESS"):
+        write_progress(job_id, 40)
+        return False
+
+    if status != "COMPLETED":
         return False
 
     out = data.get("output", {})
@@ -249,8 +256,7 @@ def upload(body: UploadURL):
 
 @app.get("/progress/{job_id}")
 def progress(job_id: str):
-    percent = read_progress(job_id)
-
+    # original
     if check_worker_and_store(job_id, "orig"):
         write_progress(job_id, 60)
 
@@ -266,7 +272,7 @@ def progress(job_id: str):
 
 
 # =========================
-# PREVIEW (FIXED: GET + HEAD)
+# PREVIEW (GET + HEAD)
 # =========================
 
 @app.get("/preview/{job_id}")
