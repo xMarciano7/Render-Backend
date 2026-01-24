@@ -66,7 +66,7 @@ for p in (PROGRESS, URLS, PRESETS, META, WORDS, BLOCKS, RUNPOD_IDS, FLAGS, CLEAN
 # APP
 # =========================
 
-app = FastAPI(title="ClipFile Backend", version="4.2-fixed")
+app = FastAPI(title="ClipFile Backend", version="4.3-clean-base-video")
 
 app.add_middleware(
     CORSMiddleware,
@@ -184,6 +184,7 @@ def upload(body: UploadURL):
         open(os.path.join(META, f"{job_id}.json"), "w")
     )
 
+    # guardar SIEMPRE el vídeo limpio original
     open(os.path.join(CLEAN_URLS, f"{job_id}.txt"), "w").write(body.video_url)
 
     r = requests.post(
@@ -271,7 +272,9 @@ def translator_callback(body: TranslatorCallback):
     open(os.path.join(BLOCKS, f"{job_id}_{lang}.json"), "w").write(json.dumps(body.blocks))
 
     preset = json.load(open(os.path.join(PRESETS, f"{job_id}.json")))["translated"]
-    base_video_url = open(os.path.join(URLS, f"{job_id}_orig.txt")).read().strip()
+
+    # USAR SIEMPRE EL VIDEO LIMPIO (SIN SUBTITULOS)
+    base_video_url = open(os.path.join(CLEAN_URLS, f"{job_id}.txt")).read().strip()
 
     r = requests.post(
         f"https://api.runpod.ai/v2/{RUNPOD_WORKER_ENDPOINT_ID}/run",
