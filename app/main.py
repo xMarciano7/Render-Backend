@@ -55,15 +55,10 @@ META = os.path.join(STORE, "meta")
 WORDS = os.path.join(STORE, "words")
 BLOCKS = os.path.join(STORE, "blocks")
 RUNPOD_IDS = os.path.join(STORE, "runpod_ids")
-LANG_DONE = os.path.join(STORE, "lang_done")
-CLEAN_URLS = os.path.join(STORE, "clean_urls")
 FLAGS = os.path.join(STORE, "flags")
+CLEAN_URLS = os.path.join(STORE, "clean_urls")
 
-for p in (
-    PROGRESS, URLS, PRESETS, META,
-    WORDS, BLOCKS, RUNPOD_IDS,
-    LANG_DONE, CLEAN_URLS, FLAGS
-):
+for p in (PROGRESS, URLS, PRESETS, META, WORDS, BLOCKS, RUNPOD_IDS, FLAGS, CLEAN_URLS):
     os.makedirs(p, exist_ok=True)
 
 
@@ -71,7 +66,7 @@ for p in (
 # APP
 # =========================
 
-app = FastAPI(title="ClipFile Backend", version="3.1-preview-download-split")
+app = FastAPI(title="ClipFile Backend", version="4.0-callback-clean")
 
 app.add_middleware(
     CORSMiddleware,
@@ -81,10 +76,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
-# =========================
-# OPTIONS
-# =========================
 
 @app.options("/{path:path}")
 def options_all(path: str):
@@ -103,22 +94,21 @@ class UploadURL(BaseModel):
     languages: list[str] | None = None
 
 
+class WorkerCallback(BaseModel):
+    job_id: str
+    base_url: str
+    words: list | None = None
+
+
 class TranslatorCallback(BaseModel):
     job_id: str
     language: str
-    blocks: list[dict]
+    blocks: list
 
 
 # =========================
 # HELPERS
 # =========================
-
-def extract_job_id_from_video_url(video_url: str) -> str | None:
-    try:
-        return video_url.split("/")[-1].replace(".mp4", "")
-    except:
-        return None
-
 
 def write_progress(job_id: str, value: int):
     path = os.path.join(PROGRESS, f"{job_id}.txt")
@@ -135,7 +125,7 @@ def read_progress(job_id: str) -> int:
     try:
         return int(open(os.path.join(PROGRESS, f"{job_id}.txt")).read())
     except:
-        return -1
+        return 0
 
 
 def r2_client():
@@ -148,47 +138,11 @@ def r2_client():
     )
 
 
-def all_clips_ready(job_id: str) -> bool:
+def all_translated_ready(job_id: str) -> bool:
     langs = json.load(open(os.path.join(META, f"{job_id}.json"))).get("languages", [])
-    if not os.path.exists(os.path.join(URLS, f"{job_id}_orig.txt")):
-        return False
     for lang in langs:
         if not os.path.exists(os.path.join(URLS, f"{job_id}_{lang}.txt")):
             return False
-    return True
-
-
-def check_worker_and_store(job_id: str, suffix: str):
-    id_path = os.path.join(RUNPOD_IDS, f"{job_id}_{suffix}.txt")
-    if not os.path.exists(id_path):
-        return False
-
-    runpod_id = open(id_path).read().strip()
-
-    r = requests.get(
-        f"https://api.runpod.ai/v2/{RUNPOD_WORKER_ENDPOINT_ID}/status/{runpod_id}",
-        headers={"Authorization": f"Bearer {RUNPOD_API_KEY}"},
-        timeout=10,
-    )
-
-    if r.status_code != 200:
-        return False
-
-    data = r.json()
-    if data.get("status") != "COMPLETED":
-        return False
-
-    out = data.get("output", {})
-    base_url = out.get("base_url")
-    if not base_url:
-        return False
-
-    # guardar words si existen
-    words = out.get("words")
-    if words:
-        open(os.path.join(WORDS, f"{job_id}.json"), "w").write(json.dumps(words))
-
-    open(os.path.join(URLS, f"{job_id}_{suffix}.txt"), "w").write(base_url)
     return True
 
 
@@ -217,7 +171,7 @@ def upload_url():
 
 @app.post("/upload")
 def upload(body: UploadURL):
-    job_id = body.job_id or extract_job_id_from_video_url(body.video_url) or str(uuid.uuid4())
+    job_id = body.job_id or str(uuid.uuid4())
     write_progress(job_id, 5)
 
     json.dump(
@@ -240,18 +194,64 @@ def upload(body: UploadURL):
                 "job_id": job_id,
                 "video_url": body.video_url,
                 "subtitle_preset": body.subtitle_preset_original,
+                "callback": f"{BASE_URL}/worker-callback",
             }
         },
     )
 
     if r.status_code != 200:
-        write_progress(job_id, -1)
         raise HTTPException(500, r.text)
 
     open(os.path.join(RUNPOD_IDS, f"{job_id}_orig.txt"), "w").write(r.json()["id"])
     write_progress(job_id, 20)
 
     return {"job_id": job_id}
+
+
+# =========================
+# WORKER CALLBACK
+# =========================
+
+@app.post("/worker-callback")
+def worker_callback(body: WorkerCallback):
+    job_id = body.job_id
+
+    open(os.path.join(URLS, f"{job_id}_orig.txt"), "w").write(body.base_url)
+
+    if body.words:
+        open(os.path.join(WORDS, f"{job_id}.json"), "w").write(json.dumps(body.words))
+
+    langs = json.load(open(os.path.join(META, f"{job_id}.json"))).get("languages", [])
+
+    if not langs:
+        write_progress(job_id, 100)
+        return {"status": "ok"}
+
+    write_progress(job_id, 60)
+
+    for lang in langs:
+        flag = os.path.join(FLAGS, f"{job_id}_translator_{lang}.txt")
+        if os.path.exists(flag):
+            continue
+
+        requests.post(
+            f"https://api.runpod.ai/v2/{RUNPOD_TRANSLATOR_ENDPOINT_ID}/run",
+            headers={"Authorization": f"Bearer {RUNPOD_API_KEY}"},
+            json={
+                "input": {
+                    "job_id": job_id,
+                    "source_language": "eng_Latn",
+                    "target_language": lang,
+                    "words": body.words,
+                    "callback": f"{BASE_URL}/translator-callback",
+                }
+            },
+        )
+
+        open(flag, "w").write("1")
+
+    write_progress(job_id, 80)
+    return {"status": "ok"}
 
 
 # =========================
@@ -263,9 +263,7 @@ def translator_callback(body: TranslatorCallback):
     job_id = body.job_id
     lang = body.language
 
-    open(os.path.join(BLOCKS, f"{job_id}_{lang}.json"), "w").write(
-        json.dumps(body.blocks)
-    )
+    open(os.path.join(BLOCKS, f"{job_id}_{lang}.json"), "w").write(json.dumps(body.blocks))
 
     preset = json.load(open(os.path.join(PRESETS, f"{job_id}.json")))["translated"]
     base_video_url = open(os.path.join(URLS, f"{job_id}_orig.txt")).read().strip()
@@ -289,82 +287,28 @@ def translator_callback(body: TranslatorCallback):
     return {"status": "ok"}
 
 
+# =========================
+# PROGRESS (READ ONLY)
+# =========================
+
 @app.get("/progress/{job_id}")
 def progress(job_id: str):
-    # ORIGINAL
-    if check_worker_and_store(job_id, "orig"):
-        langs = json.load(open(os.path.join(META, f"{job_id}.json"))).get("languages", [])
-
-        # 🔴 FIX 1: solo original → 100%
-        if not langs:
-            write_progress(job_id, 100)
-            return {"percent": 100}
-
-        write_progress(job_id, 60)
-
-        # lanzar translator UNA VEZ por idioma
-        words_path = os.path.join(WORDS, f"{job_id}.json")
-        if not os.path.exists(words_path):
-            return {"percent": read_progress(job_id)}
-
-        words = json.load(open(words_path))
-
-        for lang in langs:
-            flag = os.path.join(FLAGS, f"{job_id}_translator_{lang}.txt")
-            if os.path.exists(flag):
-                continue
-
-            requests.post(
-                f"https://api.runpod.ai/v2/{RUNPOD_TRANSLATOR_ENDPOINT_ID}/run",
-                headers={"Authorization": f"Bearer {RUNPOD_API_KEY}"},
-                json={
-                    "input": {
-                        "job_id": job_id,
-                        "source_language": "eng_Latn",
-                        "target_language": lang,
-                        "words": words,
-                        "callback": f"{BASE_URL}/translator-callback",
-                    }
-                },
-            )
-
-            open(flag, "w").write("1")
-
-        write_progress(job_id, 80)
-
-    # TRADUCIDOS
-    langs = json.load(open(os.path.join(META, f"{job_id}.json"))).get("languages", [])
-    for lang in langs:
-        check_worker_and_store(job_id, lang)
-
-    if all_clips_ready(job_id):
-        write_progress(job_id, 100)
-        return {"percent": 100}
-
     return {"percent": read_progress(job_id)}
 
 
 # =========================
-# PREVIEW
+# PREVIEW / DOWNLOAD
 # =========================
 
 @app.get("/preview/{job_id}")
 @app.get("/preview/{job_id}/{lang}")
-@app.head("/preview/{job_id}")
-@app.head("/preview/{job_id}/{lang}")
 def preview(job_id: str, lang: str | None = None):
     suffix = lang or "orig"
     path = os.path.join(URLS, f"{job_id}_{suffix}.txt")
     if not os.path.exists(path):
-        raise HTTPException(404, "Not ready")
+        raise HTTPException(404)
+    return RedirectResponse(open(path).read().strip(), 302)
 
-    r2_url = open(path).read().strip()
-    return RedirectResponse(url=r2_url, status_code=302)
-
-
-# =========================
-# DOWNLOAD
-# =========================
 
 @app.get("/download/{job_id}")
 @app.get("/download/{job_id}/{lang}")
@@ -372,15 +316,11 @@ def download(job_id: str, lang: str | None = None):
     suffix = lang or "orig"
     path = os.path.join(URLS, f"{job_id}_{suffix}.txt")
     if not os.path.exists(path):
-        raise HTTPException(404, "Not ready")
+        raise HTTPException(404)
 
-    r2_url = open(path).read().strip()
-    r = requests.get(r2_url, stream=True)
-    if r.status_code != 200:
-        raise HTTPException(502, "Failed to fetch video")
-
+    r = requests.get(open(path).read().strip(), stream=True)
     return StreamingResponse(
-        r.iter_content(chunk_size=1024 * 1024),
+        r.iter_content(1024 * 1024),
         media_type="video/mp4",
         headers={"Content-Disposition": f'attachment; filename="{job_id}_{suffix}.mp4"'}
     )
