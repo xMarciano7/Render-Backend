@@ -28,11 +28,16 @@ R2_ACCESS_KEY = os.getenv("R2_ACCESS_KEY")
 R2_SECRET_KEY = os.getenv("R2_SECRET_KEY")
 R2_PUBLIC_BASE = os.getenv("R2_PUBLIC_BASE")
 
+BASE_URL = os.getenv("BASE_URL")
+
 if not RUNPOD_API_KEY or not RUNPOD_WORKER_ENDPOINT_ID or not RUNPOD_TRANSLATOR_ENDPOINT_ID:
     raise RuntimeError("RunPod env vars missing")
 
 if not R2_BUCKET or not R2_ACCOUNT_ID or not R2_ACCESS_KEY or not R2_SECRET_KEY or not R2_PUBLIC_BASE:
     raise RuntimeError("R2 env vars missing")
+
+if not BASE_URL:
+    raise RuntimeError("BASE_URL missing")
 
 
 # =========================
@@ -70,7 +75,7 @@ app = FastAPI(title="ClipFile Backend", version="3.1-preview-download-split")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origin_regex=r".*",
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -154,13 +159,6 @@ def all_clips_ready(job_id: str) -> bool:
 
 
 def check_worker_and_store(job_id: str, suffix: str):
-    """
-    FIX APLICADO:
-    - NO depender de status == COMPLETED.
-    - Si RunPod devuelve output.base_url, se acepta inmediatamente.
-    - Si el archivo de URL ya existe, se considera completado.
-    - El progreso intermedio (40) se mantiene.
-    """
     id_path = os.path.join(RUNPOD_IDS, f"{job_id}_{suffix}.txt")
     if not os.path.exists(id_path):
         return False
@@ -177,30 +175,21 @@ def check_worker_and_store(job_id: str, suffix: str):
         return False
 
     data = r.json()
-    status = data.get("status")
-
-    # progreso intermedio real
-    if status in ("IN_QUEUE", "IN_PROGRESS"):
-        write_progress(job_id, 40)
-
-    # === CAMBIO CLAVE ===
-    out = data.get("output") or {}
-    base_url = out.get("base_url")
-    if base_url:
-        open(os.path.join(URLS, f"{job_id}_{suffix}.txt"), "w").write(base_url)
-        return True
-
-    # fallback: si la URL ya existe en disco, darlo por completado
-    url_path = os.path.join(URLS, f"{job_id}_{suffix}.txt")
-    if os.path.exists(url_path):
-        return True
-
-    # fallo explícito
-    if status in ("FAILED", "CANCELLED", "ERROR"):
-        write_progress(job_id, -1)
+    if data.get("status") != "COMPLETED":
         return False
 
-    return False
+    out = data.get("output", {})
+    base_url = out.get("base_url")
+    if not base_url:
+        return False
+
+    # ===== FIX CLAVE: guardar words si existen =====
+    words = out.get("words")
+    if words:
+        open(os.path.join(WORDS, f"{job_id}.json"), "w").write(json.dumps(words))
+
+    open(os.path.join(URLS, f"{job_id}_{suffix}.txt"), "w").write(base_url)
+    return True
 
 
 # =========================
@@ -251,9 +240,6 @@ def upload(body: UploadURL):
                 "job_id": job_id,
                 "video_url": body.video_url,
                 "subtitle_preset": body.subtitle_preset_original,
-                "video_layout": body.subtitle_preset_original.get("videoLayout"),
-                "background_opacity": body.subtitle_preset_original.get("backgroundOpacity"),
-                "background_color": body.subtitle_preset_original.get("backgroundColor"),
             }
         },
     )
@@ -268,11 +254,72 @@ def upload(body: UploadURL):
     return {"job_id": job_id}
 
 
+# =========================
+# TRANSLATOR CALLBACK
+# =========================
+
+@app.post("/translator-callback")
+def translator_callback(body: TranslatorCallback):
+    job_id = body.job_id
+    lang = body.language
+
+    open(os.path.join(BLOCKS, f"{job_id}_{lang}.json"), "w").write(
+        json.dumps(body.blocks)
+    )
+
+    preset = json.load(open(os.path.join(PRESETS, f"{job_id}.json")))["translated"]
+    base_video_url = open(os.path.join(URLS, f"{job_id}_orig.txt")).read().strip()
+
+    r = requests.post(
+        f"https://api.runpod.ai/v2/{RUNPOD_WORKER_ENDPOINT_ID}/run",
+        headers={"Authorization": f"Bearer {RUNPOD_API_KEY}"},
+        json={
+            "input": {
+                "job_id": job_id,
+                "blocks": body.blocks,
+                "base_video_url": base_video_url,
+                "subtitle_preset": preset,
+            }
+        },
+    )
+
+    if r.status_code == 200:
+        open(os.path.join(RUNPOD_IDS, f"{job_id}_{lang}.txt"), "w").write(r.json()["id"])
+
+    return {"status": "ok"}
+
+
 @app.get("/progress/{job_id}")
 def progress(job_id: str):
-    # original
     if check_worker_and_store(job_id, "orig"):
         write_progress(job_id, 60)
+
+        langs = json.load(open(os.path.join(META, f"{job_id}.json"))).get("languages", [])
+        if not langs:
+            return {"percent": read_progress(job_id)}
+
+        words_path = os.path.join(WORDS, f"{job_id}.json")
+        if not os.path.exists(words_path):
+            return {"percent": read_progress(job_id)}
+
+        words = json.load(open(words_path))
+
+        for lang in langs:
+            requests.post(
+                f"https://api.runpod.ai/v2/{RUNPOD_TRANSLATOR_ENDPOINT_ID}/run",
+                headers={"Authorization": f"Bearer {RUNPOD_API_KEY}"},
+                json={
+                    "input": {
+                        "job_id": job_id,
+                        "source_language": "eng_Latn",
+                        "target_language": lang,
+                        "words": words,
+                        "callback": f"{BASE_URL}/translator-callback",
+                    }
+                },
+            )
+
+        write_progress(job_id, 80)
 
     langs = json.load(open(os.path.join(META, f"{job_id}.json"))).get("languages", [])
     for lang in langs:
@@ -286,7 +333,7 @@ def progress(job_id: str):
 
 
 # =========================
-# PREVIEW (GET + HEAD)
+# PREVIEW
 # =========================
 
 @app.get("/preview/{job_id}")
