@@ -154,6 +154,13 @@ def all_clips_ready(job_id: str) -> bool:
 
 
 def check_worker_and_store(job_id: str, suffix: str):
+    """
+    FIX APLICADO:
+    - NO depender de status == COMPLETED.
+    - Si RunPod devuelve output.base_url, se acepta inmediatamente.
+    - Si el archivo de URL ya existe, se considera completado.
+    - El progreso intermedio (40) se mantiene.
+    """
     id_path = os.path.join(RUNPOD_IDS, f"{job_id}_{suffix}.txt")
     if not os.path.exists(id_path):
         return False
@@ -172,21 +179,28 @@ def check_worker_and_store(job_id: str, suffix: str):
     data = r.json()
     status = data.get("status")
 
-    # progreso intermedio real (job arrancado y en ejecución)
+    # progreso intermedio real
     if status in ("IN_QUEUE", "IN_PROGRESS"):
         write_progress(job_id, 40)
-        return False
 
-    if status != "COMPLETED":
-        return False
-
-    out = data.get("output", {})
+    # === CAMBIO CLAVE ===
+    out = data.get("output") or {}
     base_url = out.get("base_url")
-    if not base_url:
+    if base_url:
+        open(os.path.join(URLS, f"{job_id}_{suffix}.txt"), "w").write(base_url)
+        return True
+
+    # fallback: si la URL ya existe en disco, darlo por completado
+    url_path = os.path.join(URLS, f"{job_id}_{suffix}.txt")
+    if os.path.exists(url_path):
+        return True
+
+    # fallo explícito
+    if status in ("FAILED", "CANCELLED", "ERROR"):
+        write_progress(job_id, -1)
         return False
 
-    open(os.path.join(URLS, f"{job_id}_{suffix}.txt"), "w").write(base_url)
-    return True
+    return False
 
 
 # =========================
