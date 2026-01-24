@@ -183,7 +183,7 @@ def check_worker_and_store(job_id: str, suffix: str):
     if not base_url:
         return False
 
-    # ===== FIX CLAVE: guardar words si existen =====
+    # guardar words si existen
     words = out.get("words")
     if words:
         open(os.path.join(WORDS, f"{job_id}.json"), "w").write(json.dumps(words))
@@ -291,13 +291,18 @@ def translator_callback(body: TranslatorCallback):
 
 @app.get("/progress/{job_id}")
 def progress(job_id: str):
+    # ORIGINAL
     if check_worker_and_store(job_id, "orig"):
+        langs = json.load(open(os.path.join(META, f"{job_id}.json"))).get("languages", [])
+
+        # 🔴 FIX 1: solo original → 100%
+        if not langs:
+            write_progress(job_id, 100)
+            return {"percent": 100}
+
         write_progress(job_id, 60)
 
-        langs = json.load(open(os.path.join(META, f"{job_id}.json"))).get("languages", [])
-        if not langs:
-            return {"percent": read_progress(job_id)}
-
+        # lanzar translator UNA VEZ por idioma
         words_path = os.path.join(WORDS, f"{job_id}.json")
         if not os.path.exists(words_path):
             return {"percent": read_progress(job_id)}
@@ -305,6 +310,10 @@ def progress(job_id: str):
         words = json.load(open(words_path))
 
         for lang in langs:
+            flag = os.path.join(FLAGS, f"{job_id}_translator_{lang}.txt")
+            if os.path.exists(flag):
+                continue
+
             requests.post(
                 f"https://api.runpod.ai/v2/{RUNPOD_TRANSLATOR_ENDPOINT_ID}/run",
                 headers={"Authorization": f"Bearer {RUNPOD_API_KEY}"},
@@ -319,8 +328,11 @@ def progress(job_id: str):
                 },
             )
 
+            open(flag, "w").write("1")
+
         write_progress(job_id, 80)
 
+    # TRADUCIDOS
     langs = json.load(open(os.path.join(META, f"{job_id}.json"))).get("languages", [])
     for lang in langs:
         check_worker_and_store(job_id, lang)
