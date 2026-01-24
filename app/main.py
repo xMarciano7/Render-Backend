@@ -8,7 +8,7 @@ import json
 import requests
 import boto3
 
-from fastapi import FastAPI, HTTPException, Response
+from fastapi import FastAPI, HTTPException, Response, Query
 from fastapi.responses import StreamingResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -66,7 +66,7 @@ for p in (PROGRESS, URLS, PRESETS, META, WORDS, BLOCKS, RUNPOD_IDS, FLAGS, CLEAN
 # APP
 # =========================
 
-app = FastAPI(title="ClipFile Backend", version="4.0-callback-clean")
+app = FastAPI(title="ClipFile Backend", version="4.1-final-orchestrated")
 
 app.add_middleware(
     CORSMiddleware,
@@ -213,44 +213,21 @@ def upload(body: UploadURL):
 # =========================
 
 @app.post("/worker-callback")
-def worker_callback(body: WorkerCallback):
+def worker_callback(
+    body: WorkerCallback,
+    lang: str | None = Query(default=None)
+):
     job_id = body.job_id
 
-    open(os.path.join(URLS, f"{job_id}_orig.txt"), "w").write(body.base_url)
+    suffix = lang or "orig"
+    open(os.path.join(URLS, f"{job_id}_{suffix}.txt"), "w").write(body.base_url)
 
-    if body.words:
+    if body.words and suffix == "orig":
         open(os.path.join(WORDS, f"{job_id}.json"), "w").write(json.dumps(body.words))
 
-    langs = json.load(open(os.path.join(META, f"{job_id}.json"))).get("languages", [])
-
-    if not langs:
+    if suffix != "orig" and all_translated_ready(job_id):
         write_progress(job_id, 100)
-        return {"status": "ok"}
 
-    write_progress(job_id, 60)
-
-    for lang in langs:
-        flag = os.path.join(FLAGS, f"{job_id}_translator_{lang}.txt")
-        if os.path.exists(flag):
-            continue
-
-        requests.post(
-            f"https://api.runpod.ai/v2/{RUNPOD_TRANSLATOR_ENDPOINT_ID}/run",
-            headers={"Authorization": f"Bearer {RUNPOD_API_KEY}"},
-            json={
-                "input": {
-                    "job_id": job_id,
-                    "source_language": "eng_Latn",
-                    "target_language": lang,
-                    "words": body.words,
-                    "callback": f"{BASE_URL}/translator-callback",
-                }
-            },
-        )
-
-        open(flag, "w").write("1")
-
-    write_progress(job_id, 80)
     return {"status": "ok"}
 
 
@@ -277,6 +254,7 @@ def translator_callback(body: TranslatorCallback):
                 "blocks": body.blocks,
                 "base_video_url": base_video_url,
                 "subtitle_preset": preset,
+                "callback": f"{BASE_URL}/worker-callback?lang={lang}",
             }
         },
     )
@@ -288,7 +266,7 @@ def translator_callback(body: TranslatorCallback):
 
 
 # =========================
-# PROGRESS (READ ONLY)
+# PROGRESS
 # =========================
 
 @app.get("/progress/{job_id}")
@@ -322,5 +300,5 @@ def download(job_id: str, lang: str | None = None):
     return StreamingResponse(
         r.iter_content(1024 * 1024),
         media_type="video/mp4",
-        headers={"Content-Disposition": f'attachment; filename="{job_id}_{suffix}.mp4"'}
+        headers={"Content-Disposition": f'attachment; filename="{job_id}_{suffix}.mp4"'},
     )
