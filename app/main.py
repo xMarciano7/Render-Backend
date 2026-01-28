@@ -66,7 +66,7 @@ for p in (PROGRESS, URLS, PRESETS, META, WORDS, BLOCKS, RUNPOD_IDS, FLAGS, CLEAN
 # APP
 # =========================
 
-app = FastAPI(title="ClipFile Backend", version="4.3-clean-base-video")
+app = FastAPI(title="ClipFile Backend", version="4.5-preset-normalization")
 
 app.add_middleware(
     CORSMiddleware,
@@ -92,6 +92,8 @@ class UploadURL(BaseModel):
     subtitle_preset_original: dict
     subtitle_preset_translated: dict
     languages: list[str] | None = None
+    words_per_block: int | None = None
+    max_lines: int | None = None
 
 
 class WorkerCallback(BaseModel):
@@ -174,17 +176,33 @@ def upload(body: UploadURL):
     job_id = body.job_id or str(uuid.uuid4())
     write_progress(job_id, 5)
 
+    words_per_block = max(1, min(int(body.words_per_block or 1), 4))
+    max_lines = 2 if int(body.max_lines or 1) == 2 else 1
+
+    # 🔴 NORMALIZACIÓN CRÍTICA DEL PRESET
+    preset_original = dict(body.subtitle_preset_original)
+    preset_translated = dict(body.subtitle_preset_translated)
+
+    preset_original["words_per_block"] = words_per_block
+    preset_original["max_lines"] = max_lines
+
+    preset_translated["words_per_block"] = words_per_block
+    preset_translated["max_lines"] = max_lines
+
     json.dump(
-        {"original": body.subtitle_preset_original, "translated": body.subtitle_preset_translated},
+        {"original": preset_original, "translated": preset_translated},
         open(os.path.join(PRESETS, f"{job_id}.json"), "w")
     )
 
     json.dump(
-        {"languages": body.languages or []},
+        {
+            "languages": body.languages or [],
+            "words_per_block": words_per_block,
+            "max_lines": max_lines,
+        },
         open(os.path.join(META, f"{job_id}.json"), "w")
     )
 
-    # guardar SIEMPRE el vídeo limpio original
     open(os.path.join(CLEAN_URLS, f"{job_id}.txt"), "w").write(body.video_url)
 
     r = requests.post(
@@ -194,7 +212,9 @@ def upload(body: UploadURL):
             "input": {
                 "job_id": job_id,
                 "video_url": body.video_url,
-                "subtitle_preset": body.subtitle_preset_original,
+                "subtitle_preset": preset_original,
+                "words_per_block": words_per_block,
+                "max_lines": max_lines,
                 "callback": f"{BASE_URL}/worker-callback",
             }
         },
@@ -223,7 +243,9 @@ def worker_callback(body: WorkerCallback, lang: str | None = Query(default=None)
     if suffix == "orig" and body.words:
         open(os.path.join(WORDS, f"{job_id}.json"), "w").write(json.dumps(body.words))
 
-        langs = json.load(open(os.path.join(META, f"{job_id}.json"))).get("languages", [])
+        meta = json.load(open(os.path.join(META, f"{job_id}.json")))
+        langs = meta.get("languages", [])
+
         if not langs:
             write_progress(job_id, 100)
             return {"status": "ok"}
@@ -244,6 +266,7 @@ def worker_callback(body: WorkerCallback, lang: str | None = Query(default=None)
                         "source_language": "eng_Latn",
                         "target_language": l,
                         "words": body.words,
+                        "words_per_block": meta["words_per_block"],
                         "callback": f"{BASE_URL}/translator-callback",
                     }
                 },
@@ -272,8 +295,8 @@ def translator_callback(body: TranslatorCallback):
     open(os.path.join(BLOCKS, f"{job_id}_{lang}.json"), "w").write(json.dumps(body.blocks))
 
     preset = json.load(open(os.path.join(PRESETS, f"{job_id}.json")))["translated"]
+    meta = json.load(open(os.path.join(META, f"{job_id}.json")))
 
-    # USAR SIEMPRE EL VIDEO LIMPIO (SIN SUBTITULOS)
     base_video_url = open(os.path.join(CLEAN_URLS, f"{job_id}.txt")).read().strip()
 
     r = requests.post(
@@ -285,6 +308,8 @@ def translator_callback(body: TranslatorCallback):
                 "blocks": body.blocks,
                 "base_video_url": base_video_url,
                 "subtitle_preset": preset,
+                "words_per_block": meta["words_per_block"],
+                "max_lines": meta["max_lines"],
                 "callback": f"{BASE_URL}/worker-callback?lang={lang}",
             }
         },
