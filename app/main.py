@@ -66,7 +66,7 @@ for p in (PROGRESS, URLS, PRESETS, META, WORDS, BLOCKS, RUNPOD_IDS, FLAGS, CLEAN
 # APP
 # =========================
 
-app = FastAPI(title="ClipFile Backend", version="4.6-frontend-exact")
+app = FastAPI(title="ClipFile Backend", version="4.7-split-support")
 
 app.add_middleware(
     CORSMiddleware,
@@ -88,7 +88,9 @@ def options_all(path: str):
 
 class UploadURL(BaseModel):
     job_id: str | None = None
-    video_url: str
+    video_url: str | None = None
+    video_url_top: str | None = None
+    video_url_bottom: str | None = None
     subtitle_preset_original: dict
     subtitle_preset_translated: dict
     languages: list[str] | None = None
@@ -174,20 +176,17 @@ def upload(body: UploadURL):
     job_id = body.job_id or str(uuid.uuid4())
     write_progress(job_id, 5)
 
-    # 🔴 LEER SOLO DESDE EL PRESET DEL FRONTEND (camelCase EXACTO)
-    wpb = int(body.subtitle_preset_original.get("wordsPerBlock", 1))
-    wpb = max(1, min(wpb, 4))
-
-    max_lines = int(body.subtitle_preset_original.get("maxLines", 1))
-    max_lines = 2 if max_lines == 2 else 1
-
     preset_original = dict(body.subtitle_preset_original)
     preset_translated = dict(body.subtitle_preset_translated)
 
-    # mantener camelCase
+    wpb = int(preset_original.get("wordsPerBlock", 1))
+    wpb = max(1, min(wpb, 4))
+
+    max_lines = int(preset_original.get("maxLines", 1))
+    max_lines = 2 if max_lines == 2 else 1
+
     preset_original["wordsPerBlock"] = wpb
     preset_original["maxLines"] = max_lines
-
     preset_translated["wordsPerBlock"] = wpb
     preset_translated["maxLines"] = max_lines
 
@@ -201,23 +200,51 @@ def upload(body: UploadURL):
             "languages": body.languages or [],
             "wordsPerBlock": wpb,
             "maxLines": max_lines,
+            "videoComposition": preset_original.get("videoComposition", "single"),
+            "videoLayout": preset_original.get("videoLayout"),
         },
         open(os.path.join(META, f"{job_id}.json"), "w"),
     )
 
-    open(os.path.join(CLEAN_URLS, f"{job_id}.txt"), "w").write(body.video_url)
+    composition = preset_original.get("videoComposition", "single")
+
+    if composition == "split":
+        if not body.video_url_top or not body.video_url_bottom:
+            raise HTTPException(400, "Split mode requires video_url_top and video_url_bottom")
+
+        json.dump(
+            {
+                "top": body.video_url_top,
+                "bottom": body.video_url_bottom,
+            },
+            open(os.path.join(CLEAN_URLS, f"{job_id}.json"), "w"),
+        )
+
+        worker_input = {
+            "job_id": job_id,
+            "video_url_top": body.video_url_top,
+            "video_url_bottom": body.video_url_bottom,
+            "subtitle_preset": preset_original,
+            "callback": f"{BASE_URL}/worker-callback",
+        }
+
+    else:
+        if not body.video_url:
+            raise HTTPException(400, "Single mode requires video_url")
+
+        open(os.path.join(CLEAN_URLS, f"{job_id}.txt"), "w").write(body.video_url)
+
+        worker_input = {
+            "job_id": job_id,
+            "video_url": body.video_url,
+            "subtitle_preset": preset_original,
+            "callback": f"{BASE_URL}/worker-callback",
+        }
 
     r = requests.post(
         f"https://api.runpod.ai/v2/{RUNPOD_WORKER_ENDPOINT_ID}/run",
         headers={"Authorization": f"Bearer {RUNPOD_API_KEY}"},
-        json={
-            "input": {
-                "job_id": job_id,
-                "video_url": body.video_url,
-                "subtitle_preset": preset_original,
-                "callback": f"{BASE_URL}/worker-callback",
-            }
-        },
+        json={"input": worker_input},
     )
 
     if r.status_code != 200:
@@ -297,7 +324,11 @@ def translator_callback(body: TranslatorCallback):
     preset = json.load(open(os.path.join(PRESETS, f"{job_id}.json")))["translated"]
     meta = json.load(open(os.path.join(META, f"{job_id}.json")))
 
-    base_video_url = open(os.path.join(CLEAN_URLS, f"{job_id}.txt")).read().strip()
+    if meta.get("videoComposition") == "split":
+        urls = json.load(open(os.path.join(CLEAN_URLS, f"{job_id}.json")))
+        base_video_url = urls["top"]
+    else:
+        base_video_url = open(os.path.join(CLEAN_URLS, f"{job_id}.txt")).read().strip()
 
     r = requests.post(
         f"https://api.runpod.ai/v2/{RUNPOD_WORKER_ENDPOINT_ID}/run",
