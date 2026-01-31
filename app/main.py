@@ -156,6 +156,10 @@ def ensure_highlight_fields(preset: dict):
     preset.setdefault("enableEntranceAnimation", False)
     preset.setdefault("entranceAnimationType", "fade")
     preset.setdefault("entranceAnimationSpeed", 0.5)
+
+    # 🔴 FIX CRÍTICO: UNIFICAR CLAVE PARA EL WORKER
+    preset["subtitle_animation"] = preset.get("wordHighlightMode")
+
     return preset
 
 
