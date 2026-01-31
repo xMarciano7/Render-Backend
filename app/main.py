@@ -66,7 +66,7 @@ for p in (PROGRESS, URLS, PRESETS, META, WORDS, BLOCKS, RUNPOD_IDS, FLAGS, CLEAN
 # APP
 # =========================
 
-app = FastAPI(title="ClipFile Backend", version="4.7-split-support")
+app = FastAPI(title="ClipFile Backend", version="4.8-wysiwyg-highlight")
 
 app.add_middleware(
     CORSMiddleware,
@@ -148,6 +148,17 @@ def all_translated_ready(job_id: str) -> bool:
     return True
 
 
+def ensure_highlight_fields(preset: dict):
+    preset.setdefault("enableWordHighlight", False)
+    preset.setdefault("wordHighlightMode", None)
+    preset.setdefault("wordHighlightColor", "#FFFF00")
+    preset.setdefault("activeBoxOpacity", 1.0)
+    preset.setdefault("enableEntranceAnimation", False)
+    preset.setdefault("entranceAnimationType", "fade")
+    preset.setdefault("entranceAnimationSpeed", 0.5)
+    return preset
+
+
 # =========================
 # ROUTES
 # =========================
@@ -176,14 +187,11 @@ def upload(body: UploadURL):
     job_id = body.job_id or str(uuid.uuid4())
     write_progress(job_id, 5)
 
-    preset_original = dict(body.subtitle_preset_original)
-    preset_translated = dict(body.subtitle_preset_translated)
+    preset_original = ensure_highlight_fields(dict(body.subtitle_preset_original))
+    preset_translated = ensure_highlight_fields(dict(body.subtitle_preset_translated))
 
-    wpb = int(preset_original.get("wordsPerBlock", 1))
-    wpb = max(1, min(wpb, 4))
-
-    max_lines = int(preset_original.get("maxLines", 1))
-    max_lines = 2 if max_lines == 2 else 1
+    wpb = max(1, min(int(preset_original.get("wordsPerBlock", 1)), 4))
+    max_lines = 2 if int(preset_original.get("maxLines", 1)) == 2 else 1
 
     preset_original["wordsPerBlock"] = wpb
     preset_original["maxLines"] = max_lines
@@ -213,10 +221,7 @@ def upload(body: UploadURL):
             raise HTTPException(400, "Split mode requires video_url_top and video_url_bottom")
 
         json.dump(
-            {
-                "top": body.video_url_top,
-                "bottom": body.video_url_bottom,
-            },
+            {"top": body.video_url_top, "bottom": body.video_url_bottom},
             open(os.path.join(CLEAN_URLS, f"{job_id}.json"), "w"),
         )
 
@@ -227,7 +232,6 @@ def upload(body: UploadURL):
             "subtitle_preset": preset_original,
             "callback": f"{BASE_URL}/worker-callback",
         }
-
     else:
         if not body.video_url:
             raise HTTPException(400, "Single mode requires video_url")
@@ -321,7 +325,9 @@ def translator_callback(body: TranslatorCallback):
 
     open(os.path.join(BLOCKS, f"{job_id}_{lang}.json"), "w").write(json.dumps(body.blocks))
 
-    preset = json.load(open(os.path.join(PRESETS, f"{job_id}.json")))["translated"]
+    preset = ensure_highlight_fields(
+        json.load(open(os.path.join(PRESETS, f"{job_id}.json")))["translated"]
+    )
     meta = json.load(open(os.path.join(META, f"{job_id}.json")))
 
     if meta.get("videoComposition") == "split":
