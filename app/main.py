@@ -94,6 +94,10 @@ class UploadURL(BaseModel):
     subtitle_preset_original: dict
     subtitle_preset_translated: dict
     languages: list[str] | None = None
+    overlay_hook_original: dict | None = None
+    overlay_hook_translated: dict | None = None
+    enable_subtitles: bool | None = True
+    enable_overlay: bool | None = False
 
 
 class WorkerCallback(BaseModel):
@@ -163,6 +167,37 @@ def ensure_highlight_fields(preset: dict):
     return preset
 
 
+
+
+def sanitize_overlay_text(value: str) -> str:
+    text = (value or '')[:40]
+    return '\n'.join(text.split('\n')[:4])
+
+
+def build_overlay_hook(payload_overlay: dict | None, preset: dict) -> dict:
+    payload_overlay = payload_overlay if isinstance(payload_overlay, dict) else {}
+
+    # New contract from frontend: overlayText + overlayHookEnabled + overlayStyle
+    raw_text = str(payload_overlay.get('overlayText') or payload_overlay.get('text') or preset.get('overlayText') or '')
+    text = sanitize_overlay_text(raw_text)
+
+    style = payload_overlay.get('overlayStyle')
+    if not isinstance(style, dict):
+        style = payload_overlay.get('style')
+    if not isinstance(style, dict):
+        style = preset.get('overlayStyle') if isinstance(preset.get('overlayStyle'), dict) else {}
+
+    enabled_flag = bool(
+        payload_overlay.get('overlayHookEnabled', payload_overlay.get('enabled', preset.get('overlayHookEnabled', False)))
+    )
+    enabled = bool(enabled_flag and text.strip())
+
+    return {
+        'enabled': enabled,
+        'text': text,
+        'style': style or {},
+    }
+
 # =========================
 # ROUTES
 # =========================
@@ -193,6 +228,8 @@ def upload(body: UploadURL):
 
     preset_original = ensure_highlight_fields(dict(body.subtitle_preset_original))
     preset_translated = ensure_highlight_fields(dict(body.subtitle_preset_translated))
+    overlay_hook_original = build_overlay_hook(body.overlay_hook_original, preset_original)
+    overlay_hook_translated = build_overlay_hook(body.overlay_hook_translated, preset_translated)
 
     wpb = max(1, min(int(preset_original.get("wordsPerBlock", 1)), 4))
     max_lines = 2 if int(preset_original.get("maxLines", 1)) == 2 else 1
@@ -214,6 +251,8 @@ def upload(body: UploadURL):
             "maxLines": max_lines,
             "videoComposition": preset_original.get("videoComposition", "single"),
             "videoLayout": preset_original.get("videoLayout"),
+            "enable_subtitles": bool(body.enable_subtitles),
+            "enable_overlay": bool(body.enable_overlay),
         },
         open(os.path.join(META, f"{job_id}.json"), "w"),
     )
@@ -235,6 +274,8 @@ def upload(body: UploadURL):
             "video_url_bottom": body.video_url_bottom,
             "subtitle_preset": preset_original,
             "callback": f"{BASE_URL}/worker-callback",
+            "overlay_hook": overlay_hook_original,
+            "enable_subtitles": bool(body.enable_subtitles),
         }
     else:
         if not body.video_url:
@@ -247,6 +288,8 @@ def upload(body: UploadURL):
             "video_url": body.video_url,
             "subtitle_preset": preset_original,
             "callback": f"{BASE_URL}/worker-callback",
+            "overlay_hook": overlay_hook_original,
+            "enable_subtitles": bool(body.enable_subtitles),
         }
 
     r = requests.post(
@@ -350,6 +393,8 @@ def translator_callback(body: TranslatorCallback):
                 "base_video_url": base_video_url,
                 "subtitle_preset": preset,
                 "callback": f"{BASE_URL}/worker-callback?lang={lang}",
+                "overlay_hook": build_overlay_hook(None, preset),
+                "enable_subtitles": bool(meta.get("enable_subtitles", True)),
             }
         },
     )
