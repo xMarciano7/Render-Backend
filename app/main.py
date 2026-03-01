@@ -27,6 +27,7 @@ from pydantic import BaseModel
 from google import genai
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.1-pro-preview")
 
 if not GEMINI_API_KEY:
     raise RuntimeError("GEMINI_API_KEY missing")
@@ -36,7 +37,7 @@ gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
 def gemini_generate(prompt: str) -> str:
     response = gemini_client.models.generate_content(
-        model="gemini-3.1-pro-preview",
+        model=GEMINI_MODEL,
         contents=prompt,
     )
     return (response.text or "").strip()
@@ -57,7 +58,7 @@ R2_PUBLIC_BASE = os.getenv("R2_PUBLIC_BASE")
 
 BASE_URL = os.getenv("BASE_URL")
 
-if not RUNPOD_API_KEY or not RUNPOD_WORKER_ENDPOINT_ID or not RUNPOD_TRANSLATOR_ENDPOINT_ID:
+if not RUNPOD_API_KEY or not RUNPOD_WORKER_ENDPOINT_ID:
     raise RuntimeError("RunPod env vars missing")
 
 if not R2_BUCKET or not R2_ACCOUNT_ID or not R2_ACCESS_KEY or not R2_SECRET_KEY or not R2_PUBLIC_BASE:
@@ -120,6 +121,11 @@ class ClipDefinition(BaseModel):
     durationSec: float
 
 
+class ClipDistribution(BaseModel):
+    mode: Literal["full_per_language", "distributed"] = "full_per_language"
+    perLanguage: dict[str, int] | None = None
+
+
 class UploadURL(BaseModel):
     job_id: str | None = None
     video_url: str | None = None
@@ -137,6 +143,7 @@ class UploadURL(BaseModel):
     generationMode: Literal["chronological_fixed_duration", "ai_moments_fixed_duration", "ai_highlights_fixed_duration", "ai_full"]
     clipDurationSec: int | None = None
     clips: list[ClipDefinition] | None = None
+    clipDistribution: ClipDistribution | None = None
 
 
 class WorkerCallback(BaseModel):
@@ -162,6 +169,9 @@ class ClipRef(BaseModel):
     type: Literal["original", "translated"] | None = None
     language: str | None = None
     languageLabel: str | None = None
+    original_index: int | None = None
+    order_key: float | None = None
+    created_at: float | None = None
 
 
 class ClipRefsPayload(BaseModel):
@@ -189,6 +199,95 @@ def read_progress(job_id: str) -> int:
         return int(open(os.path.join(PROGRESS, f"{job_id}.txt")).read())
     except:
         return 0
+
+
+def _meta_path(job_id: str) -> str:
+    return os.path.join(META, f"{job_id}.json")
+
+
+def _read_meta(job_id: str) -> dict:
+    path = _meta_path(job_id)
+    if not os.path.exists(path):
+        return {}
+    try:
+        return json.load(open(path))
+    except Exception:
+        return {}
+
+
+def _write_meta(job_id: str, meta: dict):
+    json.dump(meta, open(_meta_path(job_id), "w"))
+
+
+def set_job_error(job_id: str, message: str):
+    meta = _read_meta(job_id)
+    if not meta:
+        return
+    meta["state"] = "error"
+    meta["error_message"] = str(message or "Unknown processing error")[:1000]
+    _write_meta(job_id, meta)
+
+
+def is_job_cancel_requested(job_id: str) -> bool:
+    meta = _read_meta(job_id)
+    return bool(meta.get("state") == "cancel_requested")
+
+
+
+
+def cancel_runpod_job(runpod_id: str):
+    endpoints = [
+        f"https://api.runpod.ai/v2/{RUNPOD_WORKER_ENDPOINT_ID}/cancel/{runpod_id}",
+        f"https://api.runpod.ai/v2/{RUNPOD_WORKER_ENDPOINT_ID}/terminate/{runpod_id}",
+        f"https://api.runpod.ai/v2/{RUNPOD_WORKER_ENDPOINT_ID}/stop/{runpod_id}",
+    ]
+    for endpoint in endpoints:
+        try:
+            requests.post(
+                endpoint,
+                headers={"Authorization": f"Bearer {RUNPOD_API_KEY}"},
+                timeout=15,
+            )
+        except Exception:
+            continue
+
+
+def cancel_runpod_jobs_for_app_job(job_id: str):
+    runpod_files = glob(os.path.join(RUNPOD_IDS, f"{job_id}_*.txt"))
+    for fp in runpod_files:
+        try:
+            runpod_id = open(fp).read().strip()
+        except Exception:
+            continue
+        if runpod_id:
+            cancel_runpod_job(runpod_id)
+
+
+def check_runpod_failure(job_id: str) -> tuple[bool, str | None]:
+    runpod_files = glob(os.path.join(RUNPOD_IDS, f"{job_id}_*.txt"))
+    for fp in runpod_files:
+        try:
+            runpod_id = open(fp).read().strip()
+        except Exception:
+            continue
+        if not runpod_id:
+            continue
+        try:
+            r = requests.get(
+                f"https://api.runpod.ai/v2/{RUNPOD_WORKER_ENDPOINT_ID}/status/{runpod_id}",
+                headers={"Authorization": f"Bearer {RUNPOD_API_KEY}"},
+                timeout=8,
+            )
+            if r.status_code != 200:
+                continue
+            payload = r.json()
+            status = str(payload.get("status", "")).upper()
+            if status in ("FAILED", "TIMED_OUT", "CANCELLED"):
+                err = payload.get("error") or payload.get("output") or payload.get("status")
+                return True, str(err)[:1000]
+        except Exception:
+            continue
+    return False, None
 
 
 def r2_client():
@@ -294,13 +393,6 @@ def parse_gemini_clips(raw_text: str) -> list[dict]:
 
 
 def gemini_pick_clips(segments: list[dict], clip_count: int, mode: str, clip_duration_sec: int | None, duration_total: float) -> list[dict]:
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        return []
-
-    model = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
-    endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
-
     constraint = (
         f"durationSec must be exactly {clip_duration_sec}."
         if mode in ("ai_moments_fixed_duration", "ai_highlights_fixed_duration")
@@ -315,22 +407,11 @@ def gemini_pick_clips(segments: list[dict], clip_count: int, mode: str, clip_dur
     )
 
     try:
-        r = requests.post(
-            endpoint,
-            headers={"Content-Type": "application/json"},
-            json={"contents": [{"parts": [{"text": prompt}]}]},
-            timeout=30,
+        response = gemini_client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=prompt,
         )
-        if r.status_code != 200:
-            return []
-        data = r.json()
-        text = (
-            data.get("candidates", [{}])[0]
-            .get("content", {})
-            .get("parts", [{}])[0]
-            .get("text", "")
-        )
-        return parse_gemini_clips(text)
+        return parse_gemini_clips(response.text or "")
     except Exception:
         return []
 
@@ -341,6 +422,9 @@ def build_ai_final_clips(meta: dict) -> list[dict]:
     clip_duration = meta.get("clipDurationSec")
     duration_total = float(meta.get("durationTotal") or 0.0)
     segments = meta.get("segments") if isinstance(meta.get("segments"), list) else []
+
+    if not segments:
+        return fallback_chronological_clips(clip_count, duration_total, clip_duration, mode)
 
     picks = gemini_pick_clips(segments, clip_count, mode, clip_duration, duration_total)
     valid: list[dict] = []
@@ -477,6 +561,9 @@ def delete_clip_and_move_to_trash(clip: ClipRef) -> dict | None:
         "languageLabel": clip.languageLabel,
         "url": url,
         "deletedAt": now_utc().isoformat().replace("+00:00", "Z"),
+        "original_index": clip.original_index,
+        "order_key": clip.order_key,
+        "created_at": clip.created_at,
     }
 
     json.dump(trash_item, open(trash_path(clip.job_id, suffix), "w"))
@@ -576,10 +663,15 @@ def build_overlay_hook(payload_overlay: dict | None, preset: dict) -> dict:
     )
     enabled = bool(enabled_flag and text.strip())
 
+    duration_mode = str(payload_overlay.get('overlayDurationMode') or payload_overlay.get('durationMode') or preset.get('overlayDurationMode') or 'full')
+    if duration_mode not in {'quarter', 'half', 'three_quarters', 'full'}:
+        duration_mode = 'full'
+
     return {
         'enabled': enabled,
         'text': text,
         'style': style or {},
+        'durationMode': duration_mode,
     }
 
 # =========================
@@ -612,6 +704,8 @@ def upload(body: UploadURL, request: Request):
     user_plan = get_user_plan(request)
     validate_upload_constraints(body, user_plan)
 
+    languages = body.languages or []
+
     preset_original = ensure_highlight_fields(dict(body.subtitle_preset_original))
     preset_translated = ensure_highlight_fields(dict(body.subtitle_preset_translated))
     overlay_hook_original = build_overlay_hook(body.overlay_hook_original, preset_original)
@@ -633,7 +727,7 @@ def upload(body: UploadURL, request: Request):
     json.dump(
         {
             "plan": user_plan,
-            "languages": body.languages or [],
+            "languages": languages,
             "wordsPerBlock": wpb,
             "maxLines": max_lines,
             "videoComposition": preset_original.get("videoComposition", "single"),
@@ -645,7 +739,10 @@ def upload(body: UploadURL, request: Request):
             "generationMode": body.generationMode,
             "clipDurationSec": body.clipDurationSec,
             "clips": [c.model_dump() for c in body.clips] if body.clips is not None else None,
+            "clipDistribution": body.clipDistribution.model_dump() if body.clipDistribution is not None else {"mode": "full_per_language", "perLanguage": None},
             "analysis_status": "analysis_pending" if body.generationMode in ("ai_moments_fixed_duration", "ai_highlights_fixed_duration", "ai_full") else "not_required",
+            "state": "processing",
+            "error_message": None,
         },
         open(os.path.join(META, f"{job_id}.json"), "w"),
     )
@@ -670,6 +767,7 @@ def upload(body: UploadURL, request: Request):
             "enable_subtitles": bool(body.enable_subtitles),
             "export_width": get_resolution_for_quality(body.exportQuality)["width"],
             "export_height": get_resolution_for_quality(body.exportQuality)["height"],
+            "cancel_check_url": f"{BASE_URL}/cancel-status/{job_id}",
         }
     else:
         if not body.video_url:
@@ -685,9 +783,13 @@ def upload(body: UploadURL, request: Request):
             "enable_subtitles": bool(body.enable_subtitles),
             "export_width": get_resolution_for_quality(body.exportQuality)["width"],
             "export_height": get_resolution_for_quality(body.exportQuality)["height"],
+            "cancel_check_url": f"{BASE_URL}/cancel-status/{job_id}",
         }
 
     open(os.path.join(PLANS, f"{job_id}.json"), "w").write(json.dumps(base_worker_input))
+
+    if languages and not RUNPOD_TRANSLATOR_ENDPOINT_ID:
+        raise HTTPException(500, "RUNPOD_TRANSLATOR_ENDPOINT_ID missing")
 
     mode = body.generationMode
     if mode == "chronological_fixed_duration":
@@ -785,6 +887,8 @@ def worker_callback(body: WorkerCallback, lang: str | None = Query(default=None)
         if not langs:
             if originals_ready >= clip_count:
                 write_progress(job_id, 100)
+                meta["state"] = "done"
+                _write_meta(job_id, meta)
             else:
                 write_progress(job_id, min(95, 20 + int((originals_ready / max(1, clip_count)) * 70)))
             return {"status": "ok"}
@@ -821,6 +925,10 @@ def worker_callback(body: WorkerCallback, lang: str | None = Query(default=None)
 
     if not suffix.startswith("orig_") and all_translated_ready(job_id):
         write_progress(job_id, 100)
+        meta = _read_meta(job_id)
+        if meta:
+            meta["state"] = "done"
+            _write_meta(job_id, meta)
 
     return {"status": "ok"}
 
@@ -833,6 +941,8 @@ def worker_callback(body: WorkerCallback, lang: str | None = Query(default=None)
 def translator_callback(body: TranslatorCallback):
     job_id = body.job_id
     lang = body.language
+    if is_job_cancel_requested(job_id):
+        return {"status": "cancelled"}
 
     open(os.path.join(BLOCKS, f"{job_id}_{lang}.json"), "w").write(json.dumps(body.blocks))
 
@@ -875,7 +985,37 @@ def translator_callback(body: TranslatorCallback):
 
 @app.get("/progress/{job_id}")
 def progress(job_id: str):
-    return {"percent": read_progress(job_id)}
+    percent = read_progress(job_id)
+    meta = _read_meta(job_id)
+    state = meta.get("state") or ("done" if percent >= 100 else "processing")
+    error_message = meta.get("error_message")
+
+    if state == "processing" and percent < 100:
+        failed, err = check_runpod_failure(job_id)
+        if failed:
+            state = "error"
+            error_message = err or "Worker failed while generating clips."
+            set_job_error(job_id, error_message)
+
+    return {"percent": percent, "state": state, "error_message": error_message}
+
+
+@app.get("/cancel-status/{job_id}")
+def cancel_status(job_id: str):
+    return {"job_id": job_id, "cancel_requested": is_job_cancel_requested(job_id)}
+
+
+@app.post("/cancel/{job_id}")
+def cancel_generation(job_id: str):
+    meta = _read_meta(job_id)
+    if not meta:
+        raise HTTPException(404, "job not found")
+    meta["state"] = "cancel_requested"
+    meta["error_message"] = "Generation canceled by user."
+    _write_meta(job_id, meta)
+    cancel_runpod_jobs_for_app_job(job_id)
+    open(os.path.join(PROGRESS, f"{job_id}.txt"), "w").write("0")
+    return {"status": "ok"}
 
 
 # =========================
@@ -892,19 +1032,35 @@ def preview(job_id: str, target: str | None = None):
     return RedirectResponse(open(path).read().strip(), 302)
 
 
+def sanitize_download_filename(filename: str | None, fallback: str) -> str:
+    raw = (filename or fallback or "clip").strip()
+    safe = re.sub(r"[^a-zA-Z0-9._\- ()]", "_", raw)
+    safe = safe.replace("..", ".")
+    safe = safe.strip(" ._") or "clip"
+    if not safe.lower().endswith(".mp4"):
+        safe = f"{safe}.mp4"
+    if len(safe) > 100:
+        name, ext = os.path.splitext(safe)
+        safe = f"{name[:95]}{ext or '.mp4'}"
+    return safe
+
+
 @app.get("/download/{job_id}")
 @app.get("/download/{job_id}/{target}")
-def download(job_id: str, target: str | None = None):
+def download(job_id: str, target: str | None = None, filename: str | None = Query(default=None)):
     suffix = resolve_suffix(job_id, target)
     path = os.path.join(URLS, f"{job_id}_{suffix}.txt")
     if not os.path.exists(path):
         raise HTTPException(404)
 
     r = requests.get(open(path).read().strip(), stream=True)
+    fallback_name = f"{job_id}_{suffix}.mp4"
+    download_name = sanitize_download_filename(filename, fallback_name)
+
     return StreamingResponse(
         r.iter_content(1024 * 1024),
         media_type="video/mp4",
-        headers={"Content-Disposition": f'attachment; filename="{job_id}_{suffix}.mp4"'},
+        headers={"Content-Disposition": f'attachment; filename="{download_name}"'},
     )
 
 
@@ -985,6 +1141,31 @@ def restore_trash_item(body: ClipRefsPayload):
         os.remove(t_path)
         restored.append(item)
     return {"restored": restored}
+
+
+@app.post("/trash/delete")
+def delete_trash_items(body: ClipRefsPayload):
+    removed = []
+    missing = []
+    for clip in body.clips:
+        suffix = resolve_suffix(clip.job_id, clip.target)
+        t_path = trash_path(clip.job_id, suffix)
+        if not os.path.exists(t_path):
+            missing.append({"job_id": clip.job_id, "target": clip.target})
+            continue
+        try:
+            item = json.load(open(t_path))
+        except Exception:
+            item = {}
+        url = item.get("url")
+        if isinstance(url, str) and url:
+            delete_remote_asset(url)
+        try:
+            os.remove(t_path)
+            removed.append({"job_id": clip.job_id, "target": clip.target})
+        except Exception:
+            missing.append({"job_id": clip.job_id, "target": clip.target})
+    return {"removed": removed, "missing": missing}
 
 
 @app.post("/trash/empty")
